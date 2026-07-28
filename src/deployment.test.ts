@@ -6,10 +6,11 @@ const projectRoot = process.cwd();
 
 describe("deployment contract", () => {
   it("uses /siteboard/ for Vite, the manifest, icons, and service worker", async () => {
-    const [viteConfig, indexHtml, manifestText, serviceWorker] =
+    const [viteConfig, indexHtml, mainSource, manifestText, serviceWorker] =
       await Promise.all([
         readFile(resolve(projectRoot, "vite.config.ts"), "utf8"),
         readFile(resolve(projectRoot, "index.html"), "utf8"),
+        readFile(resolve(projectRoot, "src/main.tsx"), "utf8"),
         readFile(resolve(projectRoot, "public/manifest.webmanifest"), "utf8"),
         readFile(resolve(projectRoot, "public/sw.js"), "utf8"),
       ]);
@@ -25,7 +26,18 @@ describe("deployment contract", () => {
     expect(manifest.scope).toBe("/siteboard/");
     expect(manifest.icons.every((icon) => icon.src.startsWith("/siteboard/")))
       .toBe(true);
-    expect(serviceWorker).toContain('"siteboard-shell-v1"');
+    expect(mainSource).toContain("scope: import.meta.env.BASE_URL");
+    expect(serviceWorker).toContain(
+      'const CACHE_PREFIX = "siteboard-shell-"',
+    );
+    expect(serviceWorker).toContain(
+      'const RELEASE_ID = "__SITEBOARD_RELEASE__"',
+    );
+    expect(serviceWorker).toContain("key.startsWith(CACHE_PREFIX)");
+    expect(serviceWorker).toContain("isInSiteboardScope(requestUrl)");
+    expect(viteConfig).toContain(
+      'worker.replaceAll("__SITEBOARD_RELEASE__", releaseId)',
+    );
 
     await Promise.all([
       access(resolve(projectRoot, "public/icon-192.png")),

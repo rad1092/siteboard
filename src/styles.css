@@ -157,6 +157,10 @@ iframe:focus-visible {
   color: var(--danger);
 }
 
+.save-status--recovery {
+  color: var(--danger);
+}
+
 .history-actions,
 .document-actions,
 .device-toggle {
@@ -180,7 +184,7 @@ iframe:focus-visible {
 }
 
 .history-actions button:hover:not(:disabled),
-.document-actions button:hover:not(:disabled),
+.document-actions button:hover:not(:disabled):not([aria-disabled="true"]),
 .device-toggle button:hover:not(:disabled),
 .compact-button:hover:not(:disabled) {
   border-color: var(--line-strong);
@@ -198,14 +202,86 @@ iframe:focus-visible {
   color: white;
 }
 
-.document-actions .primary-button:hover:not(:disabled) {
+.document-actions .primary-button:hover:not(:disabled):not([aria-disabled="true"]) {
   background: #0f4d39;
+}
+
+.document-actions .primary-button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.62;
 }
 
 .document-actions .quiet-button {
   border-color: transparent;
   background: transparent;
   color: var(--muted);
+}
+
+.export-control {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.export-status {
+  max-width: 250px;
+  max-height: 3.75em;
+  overflow: auto;
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.export-status.has-errors {
+  color: var(--danger);
+}
+
+.recovery-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #bc7c70;
+  background: #fff1ed;
+  color: #5f1d12;
+}
+
+.recovery-banner strong {
+  font-size: 13px;
+}
+
+.recovery-banner p {
+  max-width: 900px;
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.recovery-actions button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #bc7c70;
+  border-radius: 6px;
+  background: white;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.recovery-actions .primary-button {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: white;
 }
 
 .feedback {
@@ -817,11 +893,35 @@ legend {
 
   .document-actions {
     width: 100%;
+    flex-wrap: wrap;
     justify-content: flex-start;
+    overflow: visible;
   }
 
   .document-actions button {
     flex: 0 0 auto;
+  }
+
+  .export-control {
+    width: 100%;
+    flex: 1 0 100%;
+    align-items: flex-start;
+  }
+
+  .export-status {
+    max-width: none;
+    max-height: 6.25em;
+    flex: 1 1 auto;
+    padding-top: 4px;
+  }
+
+  .recovery-banner {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 14px 12px;
+  }
+
+  .recovery-actions {
+    justify-content: flex-start;
   }
 
   .workspace {

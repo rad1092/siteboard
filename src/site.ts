@@ -230,7 +230,7 @@ export function validateDocument(document: SiteDocument): ValidationIssue[] {
   }
 
   const seenSlugs = new Set<string>();
-  document.pages.forEach((page, pageIndex) => {
+  visiblePages.forEach((page, pageIndex) => {
     if (!page.title.trim()) {
       issues.push(
         issue(
@@ -274,10 +274,7 @@ export function validateDocument(document: SiteDocument): ValidationIssue[] {
     }
     seenSlugs.add(page.slug);
 
-    if (
-      !page.hidden &&
-      page.sections.filter((section) => !section.hidden).length === 0
-    ) {
+    if (page.sections.filter((section) => !section.hidden).length === 0) {
       issues.push(
         issue(
           "error",
@@ -288,7 +285,9 @@ export function validateDocument(document: SiteDocument): ValidationIssue[] {
       );
     }
 
-    page.sections.forEach((section, sectionIndex) => {
+    page.sections
+      .filter((section) => !section.hidden)
+      .forEach((section, sectionIndex) => {
       if (!section.title.trim()) {
         issues.push(
           issue(
@@ -363,7 +362,7 @@ export function validateDocument(document: SiteDocument): ValidationIssue[] {
           ),
         );
       }
-    });
+      });
   });
 
   const colorEntries = Object.entries(document.theme).filter(
@@ -381,19 +380,51 @@ export function validateDocument(document: SiteDocument): ValidationIssue[] {
     }
   });
 
-  const textContrast = contrastRatio(
-    document.theme.text,
-    document.theme.background,
-  );
-  if (textContrast !== null && textContrast < 4.5) {
-    issues.push(
-      issue(
-        "warning",
-        "theme-contrast",
-        `Text/background contrast is ${textContrast.toFixed(1)}:1; aim for at least 4.5:1.`,
-      ),
-    );
-  }
+  const contrastPairs = [
+    {
+      id: "text-background",
+      label: "Text on background",
+      foreground: document.theme.text,
+      background: document.theme.background,
+    },
+    {
+      id: "muted-background",
+      label: "Muted text on background",
+      foreground: document.theme.muted,
+      background: document.theme.background,
+    },
+    {
+      id: "text-surface",
+      label: "Text on surface",
+      foreground: document.theme.text,
+      background: document.theme.surface,
+    },
+    {
+      id: "muted-surface",
+      label: "Muted text on surface",
+      foreground: document.theme.muted,
+      background: document.theme.surface,
+    },
+    {
+      id: "surface-accent",
+      label: "Callout text on accent",
+      foreground: document.theme.surface,
+      background: document.theme.accent,
+    },
+  ];
+
+  contrastPairs.forEach((pair) => {
+    const ratio = contrastRatio(pair.foreground, pair.background);
+    if (ratio !== null && ratio < 4.5) {
+      issues.push(
+        issue(
+          "error",
+          `theme-contrast-${pair.id}`,
+          `${pair.label} contrast is ${ratio.toFixed(1)}:1; exported text requires at least 4.5:1.`,
+        ),
+      );
+    }
+  });
 
   if (!document.seo.title.trim()) {
     issues.push(issue("error", "seo-title", "SEO title is required."));
@@ -497,7 +528,7 @@ export function generateStaticHtml(
   const surface = safeColor(document.theme.surface, "#fffdf7");
   const text = safeColor(document.theme.text, "#17201b");
   const muted = safeColor(document.theme.muted, "#5d675f");
-  const accent = safeColor(document.theme.accent, "#d9552f");
+  const accent = safeColor(document.theme.accent, "#b84122");
   const radius = allowedRadii.includes(document.theme.radius)
     ? document.theme.radius
     : "8";
@@ -597,7 +628,7 @@ export function generateStaticHtml(
         max-width: 650px; margin: 32px 0 0; color: var(--muted);
         font-size: clamp(18px, 2.2vw, 25px); line-height: 1.65;
       }
-      .content-section--callout .body-copy, .content-section--callout .eyebrow { color: inherit; opacity: .86; }
+      .content-section--callout .body-copy, .content-section--callout .eyebrow { color: inherit; }
       .section-link {
         display: inline-flex; gap: 28px; margin-top: 32px; padding: 13px 16px;
         border: 1px solid currentColor; border-radius: var(--radius);

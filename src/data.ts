@@ -63,7 +63,7 @@ export const demoDocument: SiteDocument = {
     surface: "#fffdf7",
     text: "#17201b",
     muted: "#5d675f",
-    accent: "#d9552f",
+    accent: "#b84122",
     font: "system",
     radius: "8",
   },

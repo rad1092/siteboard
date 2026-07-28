@@ -36,6 +36,61 @@ describe("document validation", () => {
     expect(isSafeHref("#contact")).toBe(true);
     expect(isSafeHref("data:text/html,unsafe")).toBe(false);
   });
+
+  it("ignores unfinished hidden content and only blocks visible collisions", () => {
+    const document = cloneDocument(demoDocument);
+    document.pages[1].hidden = true;
+    document.pages[1].title = "";
+    document.pages[1].navLabel = "";
+    document.pages[1].slug = document.pages[0].slug;
+    document.pages[1].sections[0].title = "";
+    document.pages[1].sections[0].linkUrl = "javascript:alert(1)";
+    document.pages[0].sections[1].hidden = true;
+    document.pages[0].sections[1].title = "";
+    document.pages[0].sections[1].linkUrl = "javascript:alert(1)";
+
+    const hiddenIssueIds = validateDocument(document).map((item) => item.id);
+    expect(
+      hiddenIssueIds.some(
+        (id) =>
+          id.includes(document.pages[1].id) ||
+          id.includes(document.pages[1].sections[0].id) ||
+          id.includes(document.pages[0].sections[1].id),
+      ),
+    ).toBe(false);
+
+    document.pages[2].slug = document.pages[0].slug;
+    const visibleIssueIds = validateDocument(document).map((item) => item.id);
+    expect(visibleIssueIds).toContain(
+      `page-slug-duplicate-${document.pages[2].id}`,
+    );
+  });
+
+  it("blocks unreadable color combinations used by exported pages", () => {
+    const document = cloneDocument(demoDocument);
+    document.theme.text = document.theme.background;
+    document.theme.muted = document.theme.surface;
+    document.theme.accent = document.theme.surface;
+
+    const issueIds = validateDocument(document)
+      .filter((item) => item.level === "error")
+      .map((item) => item.id);
+
+    expect(issueIds).toContain("theme-contrast-text-background");
+    expect(issueIds).toContain("theme-contrast-muted-surface");
+    expect(issueIds).toContain("theme-contrast-surface-accent");
+  });
+
+  it("blocks visible links to pages that are hidden from export", () => {
+    const document = cloneDocument(demoDocument);
+    document.pages[1].hidden = true;
+
+    const issueIds = validateDocument(document).map((item) => item.id);
+
+    expect(issueIds).toContain(
+      `section-link-page-${document.pages[0].sections[1].id}`,
+    );
+  });
 });
 
 describe("imports and static export", () => {
@@ -57,5 +112,6 @@ describe("imports and static export", () => {
     expect(html).toContain("page-home");
     expect(html).not.toContain('class="site-page" id="page-services"');
     expect(html).not.toContain("react");
+    expect(html).not.toContain("opacity: .86");
   });
 });

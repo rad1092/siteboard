@@ -15,6 +15,11 @@ import {
   parseImportedDocument,
   validateDocument,
 } from "./site";
+import {
+  loadStoredDocument,
+  saveStoredDocument,
+  type StorageRecovery,
+} from "./storage";
 import type {
   FontToken,
   RadiusToken,
@@ -26,21 +31,9 @@ import type {
   ValidationIssue,
 } from "./types";
 
-const STORAGE_KEY = "siteboard.document.v1";
-
 type InspectorTab = "content" | "theme" | "seo" | "validation";
 type PreviewDevice = "desktop" | "mobile";
-type SaveState = "saved" | "saving" | "error";
-
-function loadInitialDocument(): SiteDocument {
-  if (typeof window === "undefined") return cloneDocument(demoDocument);
-
-  const saved = window.localStorage.getItem(STORAGE_KEY);
-  if (!saved) return cloneDocument(demoDocument);
-
-  const result = parseImportedDocument(saved);
-  return result.ok ? result.document : cloneDocument(demoDocument);
-}
+type SaveState = "saved" | "saving" | "error" | "recovery";
 
 function withTimestamp(document: SiteDocument): SiteDocument {
   return {
@@ -68,6 +61,19 @@ function downloadText(filename: string, value: string, type: string): void {
   URL.revokeObjectURL(url);
 }
 
+function readFileText(file: File): Promise<string> {
+  if (typeof file.text === "function") return file.text();
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result ?? "")));
+    reader.addEventListener("error", () =>
+      reject(reader.error ?? new Error("The file could not be read.")),
+    );
+    reader.readAsText(file);
+  });
+}
+
 function exportBasename(siteName: string): string {
   const normalized = siteName
     .trim()
@@ -75,6 +81,10 @@ function exportBasename(siteName: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
   return normalized || "site";
+}
+
+function safeTimestamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
 function Field({
@@ -689,7 +699,11 @@ function Inspector({
   const errorCount = issues.filter((item) => item.level === "error").length;
 
   return (
-    <section className="panel inspector-panel" aria-labelledby="inspector-title">
+    <section
+      className="panel inspector-panel"
+      id="inspector-panel"
+      aria-labelledby="inspector-title"
+    >
       <div className="panel-heading inspector-heading">
         <div>
           <p className="panel-kicker">Edit</p>
@@ -794,10 +808,13 @@ function Preview({
 }
 
 export default function App() {
+  const [initialStorage] = useState(() =>
+    loadStoredDocument(window.localStorage),
+  );
   const [history, dispatch] = useReducer(
     historyReducer,
-    undefined,
-    () => createHistory(loadInitialDocument()),
+    initialStorage.document,
+    createHistory,
   );
   const siteDocument = history.present;
   const [selectedPageId, setSelectedPageId] = useState(
@@ -810,7 +827,15 @@ export default function App() {
     useState<InspectorTab>("content");
   const [previewDevice, setPreviewDevice] =
     useState<PreviewDevice>("desktop");
-  const [saveState, setSaveState] = useState<SaveState>("saving");
+  const [recovery, setRecovery] = useState<StorageRecovery | null>(
+    initialStorage.recovery,
+  );
+  const [autosaveAllowed, setAutosaveAllowed] = useState(
+    !initialStorage.recovery,
+  );
+  const [saveState, setSaveState] = useState<SaveState>(
+    initialStorage.recovery ? "recovery" : "saving",
+  );
   const [feedback, setFeedback] = useState("");
   const importInput = useRef<HTMLInputElement>(null);
 
@@ -834,7 +859,8 @@ export default function App() {
     () => validateDocument(siteDocument),
     [siteDocument],
   );
-  const errorCount = issues.filter((item) => item.level === "error").length;
+  const errorIssues = issues.filter((item) => item.level === "error");
+  const errorCount = errorIssues.length;
   const previewHtml = useMemo(
     () =>
       generateStaticHtml(siteDocument, {
@@ -847,7 +873,7 @@ export default function App() {
     const next = update(siteDocument);
     if (JSON.stringify(next) === JSON.stringify(siteDocument)) return;
 
-    setSaveState("saving");
+    setSaveState(autosaveAllowed ? "saving" : "recovery");
     dispatch({
       type: "commit",
       document: withTimestamp(next),
@@ -855,20 +881,24 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!autosaveAllowed) return;
+
     const timeout = window.setTimeout(() => {
-      try {
-        window.localStorage.setItem(
-          STORAGE_KEY,
-          JSON.stringify(siteDocument),
-        );
+      const result = saveStoredDocument(window.localStorage, siteDocument);
+      if (result.ok) {
         setSaveState("saved");
-      } catch {
+      } else if (result.reason === "unsafe-primary") {
+        const nextLoad = loadStoredDocument(window.localStorage);
+        setRecovery(nextLoad.recovery);
+        setAutosaveAllowed(false);
+        setSaveState("recovery");
+      } else {
         setSaveState("error");
       }
     }, 250);
 
     return () => window.clearTimeout(timeout);
-  }, [siteDocument]);
+  }, [autosaveAllowed, siteDocument]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -878,13 +908,13 @@ export default function App() {
       if (!event.shiftKey && history.past.length === 0) return;
 
       event.preventDefault();
-      setSaveState("saving");
+      setSaveState(autosaveAllowed ? "saving" : "recovery");
       dispatch({ type: event.shiftKey ? "redo" : "undo" });
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [history.future.length, history.past.length]);
+  }, [autosaveAllowed, history.future.length, history.past.length]);
 
   const selectPage = (pageId: string) => {
     const page = siteDocument.pages.find((item) => item.id === pageId);
@@ -1016,18 +1046,57 @@ export default function App() {
     event.target.value = "";
     if (!file) return;
 
-    const result = parseImportedDocument(await file.text());
+    const result = parseImportedDocument(await readFileText(file));
     if (!result.ok) {
       setFeedback(result.error);
       return;
     }
 
+    const confirmed = window.confirm(
+      `Import "${file.name}" and replace the current document? ` +
+        "Siteboard will download a JSON backup first. " +
+        "Importing clears Undo and Redo history and cannot be undone in the editor.",
+    );
+    if (!confirmed) {
+      setFeedback("Import cancelled. The current document was not changed.");
+      return;
+    }
+
+    const backupFilename = `${exportBasename(siteDocument.site.name)}-before-import-${safeTimestamp()}.siteboard.json`;
+    try {
+      downloadText(
+        backupFilename,
+        jsonExport(siteDocument),
+        "application/json",
+      );
+    } catch {
+      setFeedback(
+        "Import stopped because the pre-import JSON backup could not be downloaded.",
+      );
+      return;
+    }
+
     const imported = withTimestamp(result.document);
-    setSaveState("saving");
+    const saved = saveStoredDocument(window.localStorage, imported, {
+      allowUnsafePrimaryReplacement: true,
+    });
+    if (!saved.ok) {
+      setSaveState(saved.reason === "unsafe-primary" ? "recovery" : "error");
+      setFeedback(
+        "Import stopped because the imported document could not be saved locally.",
+      );
+      return;
+    }
+
+    setAutosaveAllowed(true);
+    setRecovery(null);
+    setSaveState("saved");
     dispatch({ type: "replace", document: imported });
     setSelectedPageId(imported.pages[0]?.id ?? "");
     setSelectedSectionId(imported.pages[0]?.sections[0]?.id ?? "");
-    setFeedback(`Imported ${file.name}.`);
+    setFeedback(
+      `Imported ${file.name}. ${backupFilename} was downloaded first. Undo and Redo history were cleared.`,
+    );
   };
 
   const selectIssue = (item: ValidationIssue) => {
@@ -1046,19 +1115,84 @@ export default function App() {
   };
 
   const resetDemo = () => {
-    if (!window.confirm("Replace this document with the demo? Export first if needed.")) {
+    if (
+      !window.confirm(
+        "Replace this document with the demo? This clears Undo and Redo history and cannot be undone in the editor. Export JSON first if needed.",
+      )
+    ) {
       return;
     }
 
     const fresh = withTimestamp(cloneDocument(demoDocument));
-    setSaveState("saving");
+    const saved = saveStoredDocument(window.localStorage, fresh, {
+      allowUnsafePrimaryReplacement: true,
+    });
+    if (!saved.ok) {
+      setSaveState(saved.reason === "unsafe-primary" ? "recovery" : "error");
+      setFeedback("The demo could not be saved locally, so nothing changed.");
+      return;
+    }
+
+    setAutosaveAllowed(true);
+    setRecovery(null);
+    setSaveState("saved");
     dispatch({ type: "replace", document: fresh });
     setSelectedPageId(fresh.pages[0]?.id ?? "");
     setSelectedSectionId(fresh.pages[0]?.sections[0]?.id ?? "");
-    setFeedback("Demo content restored.");
+    setFeedback("Demo content restored. Undo and Redo history were cleared.");
   };
 
   const basename = exportBasename(siteDocument.site.name);
+  const exportStatus = errorCount
+    ? `HTML export blocked by ${errorCount} ${errorCount === 1 ? "error" : "errors"}. ${errorIssues.map((item) => item.message).join(" ")}`
+    : "HTML export is ready.";
+
+  const acceptRecovery = () => {
+    const saved = saveStoredDocument(window.localStorage, siteDocument, {
+      allowUnsafePrimaryReplacement: true,
+    });
+    if (!saved.ok) {
+      setSaveState("recovery");
+      setFeedback(
+        "Recovery could not be completed. Download the original data before trying again.",
+      );
+      return;
+    }
+
+    setAutosaveAllowed(true);
+    setRecovery(null);
+    setSaveState("saved");
+    setFeedback(
+      "Recovery copy is now active. The untouched original remains in the browser recovery slot.",
+    );
+  };
+
+  const downloadRecovery = () => {
+    if (!recovery) return;
+    const extension = recovery.kind === "future-schema" ? "json" : "txt";
+    downloadText(
+      `siteboard-original-recovery-${safeTimestamp()}.${extension}`,
+      recovery.raw,
+      recovery.kind === "future-schema"
+        ? "application/json"
+        : "text/plain",
+    );
+    setFeedback("The untouched original data was downloaded.");
+  };
+
+  const handleHtmlExport = () => {
+    if (errorCount) {
+      setInspectorTab("validation");
+      setFeedback(exportStatus);
+      return;
+    }
+
+    downloadText(
+      "index.html",
+      generateStaticHtml(siteDocument),
+      "text/html",
+    );
+  };
 
   return (
     <div className="app-shell">
@@ -1082,7 +1216,9 @@ export default function App() {
                 ? "Saving locally…"
                 : saveState === "error"
                   ? "Local save failed"
-                  : "Saved locally"}
+                  : saveState === "recovery"
+                    ? "Recovery needed — changes are not being saved"
+                    : "Saved locally"}
             </p>
           </div>
         </div>
@@ -1092,7 +1228,7 @@ export default function App() {
             type="button"
             disabled={!history.past.length}
             onClick={() => {
-              setSaveState("saving");
+              setSaveState(autosaveAllowed ? "saving" : "recovery");
               dispatch({ type: "undo" });
             }}
           >
@@ -1102,7 +1238,7 @@ export default function App() {
             type="button"
             disabled={!history.future.length}
             onClick={() => {
-              setSaveState("saving");
+              setSaveState(autosaveAllowed ? "saving" : "recovery");
               dispatch({ type: "redo" });
             }}
           >
@@ -1115,10 +1251,19 @@ export default function App() {
             className="sr-only"
             ref={importInput}
             type="file"
+            aria-label="Choose Siteboard JSON to import"
             accept="application/json,.json"
             onChange={handleImport}
           />
-          <button type="button" onClick={() => importInput.current?.click()}>
+          <span className="sr-only" id="import-help">
+            Import replaces the current document after confirmation, downloads
+            a JSON backup first, and clears Undo and Redo history.
+          </span>
+          <button
+            type="button"
+            aria-describedby="import-help"
+            onClick={() => importInput.current?.click()}
+          >
             Import
           </button>
           <button
@@ -1133,30 +1278,76 @@ export default function App() {
           >
             JSON
           </button>
-          <button
-            className="primary-button"
-            type="button"
-            disabled={errorCount > 0}
-            title={
-              errorCount
-                ? "Resolve validation errors before exporting HTML."
-                : "Export a standalone index.html file."
-            }
-            onClick={() =>
-              downloadText(
-                "index.html",
-                generateStaticHtml(siteDocument),
-                "text/html",
-              )
-            }
-          >
-            Export HTML
-          </button>
+          <div className="export-control">
+            <button
+              className="primary-button"
+              type="button"
+              aria-disabled={errorCount > 0}
+              aria-describedby="export-status"
+              title="Export a standalone index.html file."
+              onClick={handleHtmlExport}
+            >
+              Export HTML
+            </button>
+            <p
+              className={`export-status ${errorCount ? "has-errors" : ""}`}
+              id="export-status"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              {exportStatus}
+            </p>
+          </div>
           <button className="quiet-button" type="button" onClick={resetDemo}>
             Reset demo
           </button>
         </div>
       </header>
+
+      {recovery ? (
+        <section
+          className="recovery-banner"
+          role="alert"
+          aria-labelledby="recovery-title"
+        >
+          <div>
+            <strong id="recovery-title">
+              {recovery.kind === "future-schema"
+                ? "This saved document was created by a newer Siteboard."
+                : "Siteboard could not read the saved document."}
+            </strong>
+            <p>
+              The original has not been replaced.{" "}
+              {initialStorage.source === "backup"
+                ? "The last known-good backup is open for review."
+                : initialStorage.source === "demo"
+                  ? "The demo is open for review."
+                  : "The current in-memory copy is open for review."}{" "}
+              Changes will not be saved until you choose to use this copy.
+              {recovery.preservedInStorage
+                ? " The untouched text is also stored in the browser recovery slot."
+                : " Download the original now; the browser could not create a separate recovery slot."}
+            </p>
+          </div>
+          <div className="recovery-actions">
+            <button type="button" onClick={downloadRecovery}>
+              Download original data
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={acceptRecovery}
+            >
+              {initialStorage.source === "backup"
+                ? "Use last valid backup"
+                : initialStorage.source === "demo"
+                  ? "Start with demo"
+                  : "Use current copy"}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       <p className="feedback" role="status" aria-live="polite">
         {feedback}

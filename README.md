@@ -18,7 +18,8 @@ content, not WHAGO content.
 - Validate page structure, slugs, links, colors, contrast, and metadata.
 - Undo or redo up to 100 document changes with `Cmd/Ctrl+Z`.
 - Autosave the document locally after each change.
-- Import and export the versioned Siteboard JSON format.
+- Import and export the versioned Siteboard JSON format with a pre-import
+  backup.
 - Export one portable static HTML file containing every visible page.
 - Install as a PWA and reopen the cached editor shell offline.
 
@@ -62,13 +63,21 @@ required because Siteboard has no client-side routes.
 ## Data and privacy
 
 The current document is stored under `siteboard.document.v1` in the browser's
-local storage. Siteboard has no account, analytics, server database, or network
-sync. Clearing site data removes the autosaved copy, so export JSON for backup
+local storage. The prior valid document is rotated into
+`siteboard.document.backup.v1`. If the primary value is corrupt or from a newer
+schema, Siteboard leaves it untouched, copies its exact text to
+`siteboard.document.recovery.raw` when storage permits, stops autosaving, and
+shows download/recovery choices.
+
+Siteboard has no account, analytics, server database, or network sync. Clearing
+site data removes all browser copies, so export JSON for an independent backup
 or transfer.
 
 Imported JSON must match `schemaVersion: 1`. Text is escaped before it enters
 the preview or exported HTML, and links are limited to HTTP(S), `mailto:`,
-`tel:`, anchors, and relative URLs. Siteboard does not accept raw HTML.
+`tel:`, anchors, and relative URLs. Siteboard does not accept raw HTML. A valid
+import requires confirmation, downloads the current document as JSON before
+replacement, and then clears the editor's Undo and Redo history.
 
 ## Static HTML export
 
@@ -86,10 +95,11 @@ use page anchors such as `#page-services`.
 
 ## PWA notes
 
-The service worker precaches the editor shell and caches built assets after
-their first successful request. The user's document remains in `localStorage`;
-it is not placed in the cache. A first online visit is required before offline
-launch works.
+The service worker uses a content-derived release cache, precaches the editor
+shell, and caches built assets after their first successful request. It handles
+only requests inside `/siteboard/` and removes only stale Siteboard shell
+caches. The user's document remains in `localStorage`; it is not placed in the
+cache. A first online visit is required before offline launch works.
 
 ## License
 

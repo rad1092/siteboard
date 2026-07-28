@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Siteboard</title>
+  <rect width="512" height="512" rx="108" fill="#18201c"/>
+  <path d="M150 154c0-39 32-70 70-70h143v72H228c-8 0-14 6-14 14 0 7 4 12 11 14l89 31c42 15 70 54 70 99 0 63-51 114-114 114H131v-72h139c23 0 42-19 42-42 0-18-11-33-28-39l-88-31c-28-10-46-36-46-66v-24Z" fill="#f8f6f0"/>
+  <circle cx="382" cy="130" r="34" fill="#d9552f"/>
+</svg>

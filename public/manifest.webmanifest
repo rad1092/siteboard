@@ -1,0 +1,31 @@
+{
+  "name": "Siteboard",
+  "short_name": "Siteboard",
+  "description": "A local-first editor for small static websites.",
+  "id": "/siteboard/",
+  "start_url": "/siteboard/",
+  "scope": "/siteboard/",
+  "display": "standalone",
+  "background_color": "#e7e4dc",
+  "theme_color": "#f8f6f0",
+  "icons": [
+    {
+      "src": "/siteboard/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/siteboard/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/siteboard/siteboard-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

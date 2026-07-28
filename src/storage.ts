@@ -1,10 +1,12 @@
-import { cloneDocument, demoDocument } from "./data";
+import { createBlankDocument } from "./data";
 import { parseImportedDocument } from "./site";
 import type { SiteDocument } from "./types";
 
-export const DOCUMENT_STORAGE_KEY = "siteboard.document.v1";
-export const DOCUMENT_BACKUP_KEY = "siteboard.document.backup.v1";
+export const DOCUMENT_STORAGE_KEY = "siteboard.document.v2";
+export const DOCUMENT_BACKUP_KEY = "siteboard.document.backup.v2";
 export const DOCUMENT_RECOVERY_KEY = "siteboard.document.recovery.raw";
+export const LEGACY_DOCUMENT_STORAGE_KEY = "siteboard.document.v1";
+export const LEGACY_DOCUMENT_BACKUP_KEY = "siteboard.document.backup.v1";
 
 export type RecoveryKind = "corrupt" | "future-schema";
 
@@ -16,7 +18,7 @@ export interface StorageRecovery {
 
 export interface StoredDocumentResult {
   document: SiteDocument;
-  source: "primary" | "backup" | "demo";
+  source: "primary" | "backup" | "migrated" | "starter";
   recovery: StorageRecovery | null;
 }
 
@@ -36,21 +38,35 @@ function recoveryKind(raw: string): RecoveryKind {
       parsed !== null &&
       "schemaVersion" in parsed &&
       typeof parsed.schemaVersion === "number" &&
-      parsed.schemaVersion > 1
+      parsed.schemaVersion > 2
     ) {
       return "future-schema";
     }
   } catch {
-    // Invalid JSON is handled as a corrupt save.
+    // The caller reports invalid JSON as a damaged local save.
   }
 
   return "corrupt";
 }
 
-function validStoredDocument(raw: string | null): SiteDocument | null {
+interface ParsedStored {
+  document: SiteDocument;
+  migrated: boolean;
+}
+
+function validStoredDocument(raw: string | null): ParsedStored | null {
   if (!raw) return null;
   const result = parseImportedDocument(raw);
-  return result.ok ? result.document : null;
+  return result.ok
+    ? { document: result.document, migrated: result.migratedFrom === 1 }
+    : null;
+}
+
+function legacyDocument(storage: Storage): ParsedStored | null {
+  return (
+    validStoredDocument(storage.getItem(LEGACY_DOCUMENT_STORAGE_KEY)) ??
+    validStoredDocument(storage.getItem(LEGACY_DOCUMENT_BACKUP_KEY))
+  );
 }
 
 export function loadStoredDocument(storage: Storage): StoredDocumentResult {
@@ -58,9 +74,18 @@ export function loadStoredDocument(storage: Storage): StoredDocumentResult {
 
   if (!primaryRaw) {
     const backup = validStoredDocument(storage.getItem(DOCUMENT_BACKUP_KEY));
+    if (backup) {
+      return {
+        document: backup.document,
+        source: backup.migrated ? "migrated" : "backup",
+        recovery: null,
+      };
+    }
+
+    const legacy = legacyDocument(storage);
     return {
-      document: backup ?? cloneDocument(demoDocument),
-      source: backup ? "backup" : "demo",
+      document: legacy?.document ?? createBlankDocument(),
+      source: legacy ? "migrated" : "starter",
       recovery: null,
     };
   }
@@ -68,8 +93,8 @@ export function loadStoredDocument(storage: Storage): StoredDocumentResult {
   const primary = validStoredDocument(primaryRaw);
   if (primary) {
     return {
-      document: primary,
-      source: "primary",
+      document: primary.document,
+      source: primary.migrated ? "migrated" : "primary",
       recovery: null,
     };
   }
@@ -79,13 +104,15 @@ export function loadStoredDocument(storage: Storage): StoredDocumentResult {
     storage.setItem(DOCUMENT_RECOVERY_KEY, primaryRaw);
     preservedInStorage = true;
   } catch {
-    // The raw value remains in the primary slot and in memory for download.
+    // The primary slot still contains the untouched value.
   }
 
   const backup = validStoredDocument(storage.getItem(DOCUMENT_BACKUP_KEY));
+  const legacy = backup ? null : legacyDocument(storage);
   return {
-    document: backup ?? cloneDocument(demoDocument),
-    source: backup ? "backup" : "demo",
+    document:
+      backup?.document ?? legacy?.document ?? createBlankDocument(),
+    source: backup ? "backup" : legacy ? "migrated" : "starter",
     recovery: {
       kind: recoveryKind(primaryRaw),
       raw: primaryRaw,

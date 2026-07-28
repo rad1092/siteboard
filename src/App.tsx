@@ -7,12 +7,22 @@ import {
   useRef,
   useState,
 } from "react";
-import { cloneDocument, createPage, createSection, demoDocument } from "./data";
+import { createDeploymentZip } from "./archive";
+import {
+  blockLabels,
+  createBlankDocument,
+  createFaq,
+  createService,
+  createWork,
+} from "./data";
 import { createHistory, historyReducer } from "./history";
 import {
   generateStaticHtml,
+  imageAssetFromDataUrl,
   jsonExport,
+  MAX_DOCUMENT_IMAGE_BYTES,
   parseImportedDocument,
+  presetLabels,
   validateDocument,
 } from "./site";
 import {
@@ -21,38 +31,52 @@ import {
   type StorageRecovery,
 } from "./storage";
 import type {
-  FontToken,
-  RadiusToken,
-  SectionKind,
+  ImageAsset,
   SiteDocument,
-  SitePage,
-  SiteSection,
-  ThemeTokens,
+  ThemePreset,
   ValidationIssue,
 } from "./types";
 
-type InspectorTab = "content" | "theme" | "seo" | "validation";
+type EditorStep = "content" | "structure" | "style" | "launch";
+type ContentPanel =
+  | "identity"
+  | "services"
+  | "work"
+  | "about"
+  | "faq"
+  | "contact";
 type PreviewDevice = "desktop" | "mobile";
 type SaveState = "saved" | "saving" | "error" | "recovery";
 
+const steps: Array<[EditorStep, string, string]> = [
+  ["content", "1", "내용"],
+  ["structure", "2", "구성"],
+  ["style", "3", "스타일"],
+  ["launch", "4", "출시"],
+];
+
+const contentPanels: Array<[ContentPanel, string]> = [
+  ["identity", "기본 정보"],
+  ["services", "서비스"],
+  ["work", "작업과 갤러리"],
+  ["about", "소개"],
+  ["faq", "질문과 답변"],
+  ["contact", "연락"],
+];
+
 function withTimestamp(document: SiteDocument): SiteDocument {
-  return {
-    ...document,
-    updatedAt: new Date().toISOString(),
-  };
+  return { ...document, updatedAt: new Date().toISOString() };
 }
 
 function moveItem<T>(items: T[], index: number, direction: -1 | 1): T[] {
-  const nextIndex = index + direction;
-  if (nextIndex < 0 || nextIndex >= items.length) return items;
-
+  const target = index + direction;
+  if (target < 0 || target >= items.length) return items;
   const next = [...items];
-  [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+  [next[index], next[target]] = [next[target], next[index]];
   return next;
 }
 
-function downloadText(filename: string, value: string, type: string): void {
-  const blob = new Blob([value], { type });
+function downloadBlob(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const anchor = window.document.createElement("a");
   anchor.href = url;
@@ -61,30 +85,58 @@ function downloadText(filename: string, value: string, type: string): void {
   URL.revokeObjectURL(url);
 }
 
+function downloadText(filename: string, value: string, type: string): void {
+  downloadBlob(filename, new Blob([value], { type }));
+}
+
 function readFileText(file: File): Promise<string> {
   if (typeof file.text === "function") return file.text();
-
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.addEventListener("load", () => resolve(String(reader.result ?? "")));
     reader.addEventListener("error", () =>
-      reject(reader.error ?? new Error("The file could not be read.")),
+      reject(reader.error ?? new Error("파일을 읽을 수 없습니다.")),
     );
     reader.readAsText(file);
   });
 }
 
-function exportBasename(siteName: string): string {
-  const normalized = siteName
+function readImageDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result ?? "")));
+    reader.addEventListener("error", () =>
+      reject(reader.error ?? new Error("이미지를 읽을 수 없습니다.")),
+    );
+    reader.readAsDataURL(file);
+  });
+}
+
+function exportBasename(name: string): string {
+  const normalized = name
     .trim()
+    .normalize("NFKC")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
     .replace(/^-|-$/g, "");
-  return normalized || "site";
+  return normalized || "homepage";
 }
 
 function safeTimestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function documentImageBytes(document: SiteDocument): number {
+  return [
+    document.brand.logo,
+    document.brand.heroImage,
+    ...document.work.items.map((item) => item.image),
+  ].reduce((total, asset) => total + (asset?.size ?? 0), 0);
+}
+
+function formatImageBytes(bytes: number): string {
+  if (bytes < 1_000_000) return `${Math.round(bytes / 1_000)}KB`;
+  return `${(bytes / 1_000_000).toFixed(2)}MB`;
 }
 
 function Field({
@@ -98,666 +150,119 @@ function Field({
 }) {
   return (
     <label className="field">
-      <span className="field-label">{label}</span>
+      <span>{label}</span>
       {children}
       {hint ? <small>{hint}</small> : null}
     </label>
   );
 }
 
-function IconButton({
+function ImageUploader({
   label,
-  disabled,
-  pressed,
-  onClick,
-  children,
+  description,
+  asset,
+  onChange,
+  onError,
 }: {
   label: string;
-  disabled?: boolean;
-  pressed?: boolean;
-  onClick: () => void;
-  children: ReactNode;
+  description: string;
+  asset: ImageAsset | null;
+  onChange: (asset: ImageAsset | null) => void;
+  onError: (message: string) => void;
 }) {
-  return (
-    <button
-      className="icon-button"
-      type="button"
-      aria-label={label}
-      aria-pressed={pressed}
-      disabled={disabled}
-      onClick={onClick}
-      title={label}
-    >
-      {children}
-    </button>
-  );
-}
+  const inputRef = useRef<HTMLInputElement>(null);
 
-interface OutlineProps {
-  pages: SitePage[];
-  selectedPageId: string;
-  selectedSectionId: string;
-  onSelectPage: (pageId: string) => void;
-  onSelectSection: (sectionId: string) => void;
-  onAddPage: () => void;
-  onAddSection: () => void;
-  onMovePage: (index: number, direction: -1 | 1) => void;
-  onMoveSection: (index: number, direction: -1 | 1) => void;
-  onTogglePage: (pageId: string) => void;
-  onToggleSection: (sectionId: string) => void;
-}
-
-function Outline({
-  pages,
-  selectedPageId,
-  selectedSectionId,
-  onSelectPage,
-  onSelectSection,
-  onAddPage,
-  onAddSection,
-  onMovePage,
-  onMoveSection,
-  onTogglePage,
-  onToggleSection,
-}: OutlineProps) {
-  const selectedPage = pages.find((page) => page.id === selectedPageId);
+  const handleImage = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const dataUrl = await readImageDataUrl(file);
+      onChange(imageAssetFromDataUrl(file, dataUrl));
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "이미지를 확인해 주세요.");
+    }
+  };
 
   return (
-    <aside className="panel outline-panel" aria-labelledby="outline-title">
-      <div className="panel-heading">
-        <div>
-          <p className="panel-kicker">Structure</p>
-          <h2 id="outline-title">Pages</h2>
-        </div>
-        <button className="compact-button" type="button" onClick={onAddPage}>
-          + Page
-        </button>
-      </div>
-
-      <ol className="outline-list" aria-label="Site pages">
-        {pages.map((page, index) => (
-          <li className={page.hidden ? "is-hidden" : ""} key={page.id}>
-            <div className="outline-row">
-              <button
-                className="outline-select"
-                type="button"
-                aria-current={page.id === selectedPageId ? "page" : undefined}
-                onClick={() => onSelectPage(page.id)}
-              >
-                <span>{page.title || "Untitled page"}</span>
-                <small>/{page.slug || "missing-slug"}</small>
-              </button>
-              <div className="row-actions">
-                <IconButton
-                  label={`Move ${page.title} up`}
-                  disabled={index === 0}
-                  onClick={() => onMovePage(index, -1)}
-                >
-                  ↑
-                </IconButton>
-                <IconButton
-                  label={`Move ${page.title} down`}
-                  disabled={index === pages.length - 1}
-                  onClick={() => onMovePage(index, 1)}
-                >
-                  ↓
-                </IconButton>
-                <IconButton
-                  label={`${page.hidden ? "Show" : "Hide"} ${page.title}`}
-                  pressed={page.hidden}
-                  onClick={() => onTogglePage(page.id)}
-                >
-                  {page.hidden ? "○" : "●"}
-                </IconButton>
-              </div>
-            </div>
-          </li>
-        ))}
-      </ol>
-
-      <div className="section-outline">
-        <div className="panel-heading panel-heading--small">
-          <div>
-            <p className="panel-kicker">Selected page</p>
-            <h3>Sections</h3>
-          </div>
-          <button
-            className="compact-button"
-            type="button"
-            disabled={!selectedPage}
-            onClick={onAddSection}
-          >
-            + Section
-          </button>
-        </div>
-
-        {selectedPage ? (
-          <ol className="outline-list section-list" aria-label="Page sections">
-            {selectedPage.sections.map((section, index) => (
-              <li
-                className={section.hidden ? "is-hidden" : ""}
-                key={section.id}
-              >
-                <div className="outline-row">
-                  <button
-                    className="outline-select"
-                    type="button"
-                    aria-current={
-                      section.id === selectedSectionId ? "true" : undefined
-                    }
-                    onClick={() => onSelectSection(section.id)}
-                  >
-                    <span>{section.title || "Untitled section"}</span>
-                    <small>{section.kind}</small>
-                  </button>
-                  <div className="row-actions">
-                    <IconButton
-                      label={`Move ${section.title} up`}
-                      disabled={index === 0}
-                      onClick={() => onMoveSection(index, -1)}
-                    >
-                      ↑
-                    </IconButton>
-                    <IconButton
-                      label={`Move ${section.title} down`}
-                      disabled={index === selectedPage.sections.length - 1}
-                      onClick={() => onMoveSection(index, 1)}
-                    >
-                      ↓
-                    </IconButton>
-                    <IconButton
-                      label={`${section.hidden ? "Show" : "Hide"} ${section.title}`}
-                      pressed={section.hidden}
-                      onClick={() => onToggleSection(section.id)}
-                    >
-                      {section.hidden ? "○" : "●"}
-                    </IconButton>
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p className="empty-note">Add or select a page first.</p>
-        )}
-      </div>
-    </aside>
-  );
-}
-
-interface ContentEditorProps {
-  page?: SitePage;
-  section?: SiteSection;
-  canDeletePage: boolean;
-  onUpdatePage: (patch: Partial<SitePage>) => void;
-  onUpdateSection: (patch: Partial<SiteSection>) => void;
-  onDeletePage: () => void;
-  onDeleteSection: () => void;
-}
-
-function ContentEditor({
-  page,
-  section,
-  canDeletePage,
-  onUpdatePage,
-  onUpdateSection,
-  onDeletePage,
-  onDeleteSection,
-}: ContentEditorProps) {
-  if (!page) {
-    return <p className="empty-note">Add a page to start editing.</p>;
-  }
-
-  return (
-    <div className="inspector-stack">
-      <fieldset>
-        <legend>Page</legend>
-        <Field label="Page title">
-          <input
-            value={page.title}
-            onChange={(event) => onUpdatePage({ title: event.target.value })}
-          />
-        </Field>
-        <div className="field-grid">
-          <Field label="Navigation label">
-            <input
-              value={page.navLabel}
-              onChange={(event) =>
-                onUpdatePage({ navLabel: event.target.value })
-              }
-            />
-          </Field>
-          <Field label="URL slug" hint="Lowercase letters, numbers and hyphens.">
-            <input
-              value={page.slug}
-              onChange={(event) =>
-                onUpdatePage({ slug: event.target.value.toLowerCase() })
-              }
-              spellCheck={false}
-            />
-          </Field>
-        </div>
-        <label className="check-field">
-          <input
-            type="checkbox"
-            checked={page.hidden}
-            onChange={(event) =>
-              onUpdatePage({ hidden: event.target.checked })
-            }
-          />
-          Hide this page from navigation and export
-        </label>
-        <button
-          className="text-button danger-button"
-          type="button"
-          disabled={!canDeletePage}
-          onClick={onDeletePage}
-        >
-          Delete page
-        </button>
-      </fieldset>
-
-      {section ? (
-        <fieldset>
-          <legend>Section</legend>
-          <Field label="Section type">
-            <select
-              value={section.kind}
-              onChange={(event) =>
-                onUpdateSection({
-                  kind: event.target.value as SectionKind,
-                })
-              }
-            >
-              <option value="hero">Hero</option>
-              <option value="content">Content</option>
-              <option value="callout">Callout</option>
-            </select>
-          </Field>
-          <Field label="Eyebrow">
-            <input
-              value={section.eyebrow}
-              onChange={(event) =>
-                onUpdateSection({ eyebrow: event.target.value })
-              }
-            />
-          </Field>
-          <Field label="Heading">
-            <input
-              value={section.title}
-              onChange={(event) =>
-                onUpdateSection({ title: event.target.value })
-              }
-            />
-          </Field>
-          <Field label="Body">
-            <textarea
-              value={section.body}
-              rows={6}
-              onChange={(event) =>
-                onUpdateSection({ body: event.target.value })
-              }
-            />
-          </Field>
-          <div className="field-grid">
-            <Field label="Link text">
-              <input
-                value={section.linkLabel}
-                onChange={(event) =>
-                  onUpdateSection({ linkLabel: event.target.value })
-                }
-              />
-            </Field>
-            <Field label="Link URL">
-              <input
-                value={section.linkUrl}
-                inputMode="url"
-                spellCheck={false}
-                onChange={(event) =>
-                  onUpdateSection({ linkUrl: event.target.value })
-                }
-              />
-            </Field>
-          </div>
-          <label className="check-field">
-            <input
-              type="checkbox"
-              checked={section.hidden}
-              onChange={(event) =>
-                onUpdateSection({ hidden: event.target.checked })
-              }
-            />
-            Hide this section from preview and export
-          </label>
-          <button
-            className="text-button danger-button"
-            type="button"
-            onClick={onDeleteSection}
-          >
-            Delete section
-          </button>
-        </fieldset>
+    <div className={`image-uploader ${asset ? "has-image" : ""}`}>
+      <input
+        className="sr-only"
+        ref={inputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        aria-label={`${label} 선택`}
+        onChange={handleImage}
+      />
+      {asset ? (
+        <img src={asset.dataUrl} alt="" />
       ) : (
-        <p className="empty-note">Add or select a section to edit its content.</p>
-      )}
-    </div>
-  );
-}
-
-function ThemeEditor({
-  theme,
-  onChange,
-}: {
-  theme: ThemeTokens;
-  onChange: (patch: Partial<ThemeTokens>) => void;
-}) {
-  const colors: Array<[keyof ThemeTokens, string]> = [
-    ["background", "Background"],
-    ["surface", "Surface"],
-    ["text", "Text"],
-    ["muted", "Muted text"],
-    ["accent", "Accent"],
-  ];
-
-  return (
-    <div className="inspector-stack">
-      <fieldset>
-        <legend>Color tokens</legend>
-        {colors.map(([key, label]) => {
-          const value = String(theme[key]);
-          const pickerValue = /^#[0-9a-f]{6}$/i.test(value)
-            ? value
-            : "#000000";
-          return (
-            <div className="color-field" key={key}>
-              <label htmlFor={`color-${key}`}>{label}</label>
-              <input
-                aria-label={`${label} color picker`}
-                type="color"
-                value={pickerValue}
-                onChange={(event) => onChange({ [key]: event.target.value })}
-              />
-              <input
-                id={`color-${key}`}
-                value={value}
-                maxLength={7}
-                spellCheck={false}
-                onChange={(event) => onChange({ [key]: event.target.value })}
-              />
-            </div>
-          );
-        })}
-      </fieldset>
-
-      <fieldset>
-        <legend>Typography and shape</legend>
-        <Field label="Font family">
-          <select
-            value={theme.font}
-            onChange={(event) =>
-              onChange({ font: event.target.value as FontToken })
-            }
-          >
-            <option value="system">System sans</option>
-            <option value="serif">Editorial serif</option>
-            <option value="mono">Monospace</option>
-          </select>
-        </Field>
-        <Field label="Corner radius">
-          <select
-            value={theme.radius}
-            onChange={(event) =>
-              onChange({ radius: event.target.value as RadiusToken })
-            }
-          >
-            <option value="0">Square</option>
-            <option value="8">8 px</option>
-            <option value="18">18 px</option>
-          </select>
-        </Field>
-      </fieldset>
-    </div>
-  );
-}
-
-function SeoEditor({
-  document,
-  onSiteChange,
-  onSeoChange,
-}: {
-  document: SiteDocument;
-  onSiteChange: (patch: Partial<SiteDocument["site"]>) => void;
-  onSeoChange: (patch: Partial<SiteDocument["seo"]>) => void;
-}) {
-  return (
-    <div className="inspector-stack">
-      <fieldset>
-        <legend>Site identity</legend>
-        <Field label="Site name">
-          <input
-            value={document.site.name}
-            onChange={(event) => onSiteChange({ name: event.target.value })}
-          />
-        </Field>
-        <Field label="Base URL" hint="Use the final https:// address if known.">
-          <input
-            type="url"
-            value={document.site.baseUrl}
-            spellCheck={false}
-            onChange={(event) => onSiteChange({ baseUrl: event.target.value })}
-          />
-        </Field>
-      </fieldset>
-
-      <fieldset>
-        <legend>Search metadata</legend>
-        <Field
-          label={`SEO title (${document.seo.title.length}/60)`}
-          hint="Used for the exported HTML title."
-        >
-          <input
-            value={document.seo.title}
-            onChange={(event) => onSeoChange({ title: event.target.value })}
-          />
-        </Field>
-        <Field label={`Description (${document.seo.description.length}/160)`}>
-          <textarea
-            rows={4}
-            value={document.seo.description}
-            onChange={(event) =>
-              onSeoChange({ description: event.target.value })
-            }
-          />
-        </Field>
-      </fieldset>
-
-      <fieldset>
-        <legend>Social card</legend>
-        <Field label="Social title">
-          <input
-            value={document.seo.socialTitle}
-            onChange={(event) =>
-              onSeoChange({ socialTitle: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Social description">
-          <textarea
-            rows={3}
-            value={document.seo.socialDescription}
-            onChange={(event) =>
-              onSeoChange({ socialDescription: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Social image URL">
-          <input
-            value={document.seo.socialImage}
-            inputMode="url"
-            spellCheck={false}
-            onChange={(event) =>
-              onSeoChange({ socialImage: event.target.value })
-            }
-          />
-        </Field>
-        <div className="social-card" aria-label="Social card text preview">
-          <span>{document.site.baseUrl || "example.com"}</span>
-          <strong>
-            {document.seo.socialTitle ||
-              document.seo.title ||
-              "Untitled site"}
-          </strong>
-          <p>
-            {document.seo.socialDescription ||
-              document.seo.description ||
-              "No description yet."}
-          </p>
-        </div>
-      </fieldset>
-    </div>
-  );
-}
-
-function ValidationPanel({
-  issues,
-  onSelect,
-}: {
-  issues: ValidationIssue[];
-  onSelect: (issue: ValidationIssue) => void;
-}) {
-  const errorCount = issues.filter((item) => item.level === "error").length;
-  const warningCount = issues.length - errorCount;
-
-  return (
-    <div className="validation-panel">
-      <div className={`validation-summary ${errorCount ? "has-errors" : ""}`}>
-        <strong>
-          {errorCount
-            ? `${errorCount} export-blocking ${errorCount === 1 ? "error" : "errors"}`
-            : "Ready to export"}
-        </strong>
-        <span>
-          {warningCount} {warningCount === 1 ? "warning" : "warnings"}
+        <span className="image-placeholder" aria-hidden="true">
+          +
         </span>
-      </div>
-
-      {issues.length ? (
-        <ul className="issue-list">
-          {issues.map((item) => (
-            <li key={item.id}>
-              <button type="button" onClick={() => onSelect(item)}>
-                <span className={`issue-level ${item.level}`}>
-                  {item.level}
-                </span>
-                <span>{item.message}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="empty-note">
-          No structural, link, color, or metadata issues found.
-        </p>
       )}
+      <div>
+        <strong>{label}</strong>
+        <p>{description}</p>
+        <div className="inline-actions">
+          <button type="button" onClick={() => inputRef.current?.click()}>
+            {asset ? "이미지 바꾸기" : "이미지 선택"}
+          </button>
+          {asset ? (
+            <button type="button" onClick={() => onChange(null)}>
+              제거
+            </button>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 }
 
-interface InspectorProps {
-  tab: InspectorTab;
-  onTabChange: (tab: InspectorTab) => void;
-  document: SiteDocument;
-  selectedPage?: SitePage;
-  selectedSection?: SiteSection;
-  issues: ValidationIssue[];
-  onUpdatePage: (patch: Partial<SitePage>) => void;
-  onUpdateSection: (patch: Partial<SiteSection>) => void;
-  onUpdateTheme: (patch: Partial<ThemeTokens>) => void;
-  onUpdateSite: (patch: Partial<SiteDocument["site"]>) => void;
-  onUpdateSeo: (patch: Partial<SiteDocument["seo"]>) => void;
-  onDeletePage: () => void;
-  onDeleteSection: () => void;
-  onSelectIssue: (issue: ValidationIssue) => void;
-}
-
-function Inspector({
-  tab,
-  onTabChange,
-  document,
-  selectedPage,
-  selectedSection,
-  issues,
-  onUpdatePage,
-  onUpdateSection,
-  onUpdateTheme,
-  onUpdateSite,
-  onUpdateSeo,
-  onDeletePage,
-  onDeleteSection,
-  onSelectIssue,
-}: InspectorProps) {
-  const errorCount = issues.filter((item) => item.level === "error").length;
-
+function StartScreen({
+  onCreate,
+  onOpen,
+}: {
+  onCreate: () => void;
+  onOpen: () => void;
+}) {
   return (
-    <section
-      className="panel inspector-panel"
-      id="inspector-panel"
-      aria-labelledby="inspector-title"
-    >
-      <div className="panel-heading inspector-heading">
-        <div>
-          <p className="panel-kicker">Edit</p>
-          <h2 id="inspector-title">Inspector</h2>
-        </div>
+    <main className="start-screen">
+      <div className="start-mark" aria-hidden="true">
+        S
       </div>
-
-      <div className="inspector-tabs" aria-label="Inspector sections">
-        {(
-          [
-            ["content", "Content"],
-            ["theme", "Theme"],
-            ["seo", "SEO"],
-            ["validation", `Check${errorCount ? ` · ${errorCount}` : ""}`],
-          ] as Array<[InspectorTab, string]>
-        ).map(([value, label]) => (
-          <button
-            type="button"
-            aria-pressed={tab === value}
-            key={value}
-            onClick={() => onTabChange(value)}
-          >
-            {label}
-          </button>
-        ))}
+      <p className="start-kicker">SITEBOARD</p>
+      <h1>사업 홈페이지를 한 장으로 완성하세요.</h1>
+      <p>
+        상호와 소개, 연락처부터 입력해 먼저 공개할 수 있습니다. 서비스와
+        작업 이미지 같은 내용은 필요할 때 추가하세요.
+      </p>
+      <div className="start-actions">
+        <button className="primary-button" type="button" onClick={onCreate}>
+          새 홈페이지 만들기
+        </button>
+        <button type="button" onClick={onOpen}>
+          작업 파일 열기
+        </button>
       </div>
-
-      <div className="inspector-body">
-        {tab === "content" ? (
-          <ContentEditor
-            page={selectedPage}
-            section={selectedSection}
-            canDeletePage={document.pages.length > 1}
-            onUpdatePage={onUpdatePage}
-            onUpdateSection={onUpdateSection}
-            onDeletePage={onDeletePage}
-            onDeleteSection={onDeleteSection}
-          />
-        ) : null}
-        {tab === "theme" ? (
-          <ThemeEditor theme={document.theme} onChange={onUpdateTheme} />
-        ) : null}
-        {tab === "seo" ? (
-          <SeoEditor
-            document={document}
-            onSiteChange={onUpdateSite}
-            onSeoChange={onUpdateSeo}
-          />
-        ) : null}
-        {tab === "validation" ? (
-          <ValidationPanel issues={issues} onSelect={onSelectIssue} />
-        ) : null}
-      </div>
-    </section>
+      <ol>
+        <li>
+          <span>1</span>
+          <strong>내용 입력</strong>
+          <small>사업 정보와 연락처부터 채웁니다.</small>
+        </li>
+        <li>
+          <span>2</span>
+          <strong>화면 확인</strong>
+          <small>컴퓨터와 휴대전화 크기를 확인합니다.</small>
+        </li>
+        <li>
+          <span>3</span>
+          <strong>파일 받기</strong>
+          <small>홈페이지와 이미지를 한 묶음으로 저장합니다.</small>
+        </li>
+      </ol>
+    </main>
   );
 }
 
@@ -765,43 +270,38 @@ function Preview({
   html,
   device,
   onDeviceChange,
-  pageTitle,
 }: {
   html: string;
   device: PreviewDevice;
   onDeviceChange: (device: PreviewDevice) => void;
-  pageTitle: string;
 }) {
+  const deviceLabel = device === "desktop" ? "컴퓨터" : "휴대전화";
   return (
-    <section className="panel preview-panel" aria-labelledby="preview-title">
-      <div className="panel-heading preview-heading">
+    <section className="preview-panel" aria-labelledby="preview-title">
+      <header>
         <div>
-          <p className="panel-kicker">Live</p>
-          <h2 id="preview-title">Preview</h2>
+          <p>미리보기</p>
+          <h2 id="preview-title">현재 홈페이지</h2>
         </div>
-        <div className="device-toggle" aria-label="Preview size">
+        <div className="device-toggle" aria-label="미리보기 크기">
           <button
             type="button"
             aria-pressed={device === "desktop"}
             onClick={() => onDeviceChange("desktop")}
           >
-            Desktop
+            컴퓨터
           </button>
           <button
             type="button"
             aria-pressed={device === "mobile"}
             onClick={() => onDeviceChange("mobile")}
           >
-            Mobile
+            휴대전화
           </button>
         </div>
-      </div>
-      <div className={`preview-canvas preview-canvas--${device}`}>
-        <iframe
-          title={`${pageTitle || "Site"} ${device} preview`}
-          srcDoc={html}
-          sandbox=""
-        />
+      </header>
+      <div className={`preview-frame preview-frame--${device}`}>
+        <iframe title={`${deviceLabel} 홈페이지 미리보기`} srcDoc={html} sandbox="" />
       </div>
     </section>
   );
@@ -816,75 +316,58 @@ export default function App() {
     initialStorage.document,
     createHistory,
   );
-  const siteDocument = history.present;
-  const [selectedPageId, setSelectedPageId] = useState(
-    () => siteDocument.pages[0]?.id ?? "",
+  const document = history.present;
+  const [started, setStarted] = useState(
+    initialStorage.source !== "starter" || Boolean(initialStorage.recovery),
   );
-  const [selectedSectionId, setSelectedSectionId] = useState(
-    () => siteDocument.pages[0]?.sections[0]?.id ?? "",
-  );
-  const [inspectorTab, setInspectorTab] =
-    useState<InspectorTab>("content");
-  const [previewDevice, setPreviewDevice] =
-    useState<PreviewDevice>("desktop");
+  const [step, setStep] = useState<EditorStep>("content");
+  const [contentPanel, setContentPanel] =
+    useState<ContentPanel>("identity");
+  const [device, setDevice] = useState<PreviewDevice>("desktop");
   const [recovery, setRecovery] = useState<StorageRecovery | null>(
     initialStorage.recovery,
   );
   const [autosaveAllowed, setAutosaveAllowed] = useState(
-    !initialStorage.recovery,
+    initialStorage.source !== "starter" && !initialStorage.recovery,
   );
   const [saveState, setSaveState] = useState<SaveState>(
-    initialStorage.recovery ? "recovery" : "saving",
+    initialStorage.recovery
+      ? "recovery"
+      : initialStorage.source === "starter"
+        ? "saved"
+        : "saving",
   );
-  const [feedback, setFeedback] = useState("");
+  const [feedback, setFeedback] = useState(
+    initialStorage.source === "migrated"
+      ? "기존 Siteboard 파일을 새 홈페이지 형식으로 옮겼습니다. 공개 전에 내용과 연락처를 확인해 주세요."
+      : "",
+  );
   const importInput = useRef<HTMLInputElement>(null);
 
-  const effectivePageId = siteDocument.pages.some(
-    (page) => page.id === selectedPageId,
-  )
-    ? selectedPageId
-    : (siteDocument.pages[0]?.id ?? "");
-  const selectedPage = siteDocument.pages.find(
-    (page) => page.id === effectivePageId,
-  );
-  const effectiveSectionId = selectedPage?.sections.some(
-    (section) => section.id === selectedSectionId,
-  )
-    ? selectedSectionId
-    : (selectedPage?.sections[0]?.id ?? "");
-  const selectedSection = selectedPage?.sections.find(
-    (section) => section.id === effectiveSectionId,
-  );
-  const issues = useMemo(
-    () => validateDocument(siteDocument),
-    [siteDocument],
-  );
-  const errorIssues = issues.filter((item) => item.level === "error");
-  const errorCount = errorIssues.length;
+  const issues = useMemo(() => validateDocument(document), [document]);
+  const errors = issues.filter((item) => item.level === "error");
+  const warnings = issues.filter((item) => item.level === "warning");
+  const imageBytes = documentImageBytes(document);
   const previewHtml = useMemo(
-    () =>
-      generateStaticHtml(siteDocument, {
-        previewPageId: effectivePageId,
-      }),
-    [siteDocument, effectivePageId],
+    () => generateStaticHtml(document, { preview: true }),
+    [document],
   );
 
-  const commit = (update: (document: SiteDocument) => SiteDocument) => {
-    const next = update(siteDocument);
-    if (JSON.stringify(next) === JSON.stringify(siteDocument)) return;
-
-    setSaveState(autosaveAllowed ? "saving" : "recovery");
+  const commit = (update: (current: SiteDocument) => SiteDocument) => {
+    setStarted(true);
+    setAutosaveAllowed(true);
+    setSaveState("saving");
     dispatch({
-      type: "commit",
-      document: withTimestamp(next),
+      type: "update",
+      update,
+      updatedAt: new Date().toISOString(),
     });
   };
 
   useEffect(() => {
-    if (!autosaveAllowed) return;
-
+    if (!started || !autosaveAllowed) return;
     const timeout = window.setTimeout(() => {
-      const result = saveStoredDocument(window.localStorage, siteDocument);
+      const result = saveStoredDocument(window.localStorage, document);
       if (result.ok) {
         setSaveState("saved");
       } else if (result.reason === "unsafe-primary") {
@@ -895,10 +378,9 @@ export default function App() {
       } else {
         setSaveState("error");
       }
-    }, 250);
-
+    }, 300);
     return () => window.clearTimeout(timeout);
-  }, [autosaveAllowed, siteDocument]);
+  }, [autosaveAllowed, document, started]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -906,139 +388,25 @@ export default function App() {
       if (!modifier || event.key.toLowerCase() !== "z") return;
       if (event.shiftKey && history.future.length === 0) return;
       if (!event.shiftKey && history.past.length === 0) return;
-
       event.preventDefault();
       setSaveState(autosaveAllowed ? "saving" : "recovery");
       dispatch({ type: event.shiftKey ? "redo" : "undo" });
     };
-
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [autosaveAllowed, history.future.length, history.past.length]);
 
-  const selectPage = (pageId: string) => {
-    const page = siteDocument.pages.find((item) => item.id === pageId);
-    setSelectedPageId(pageId);
-    setSelectedSectionId(page?.sections[0]?.id ?? "");
-  };
-
-  const addPage = () => {
-    const page = createPage(
-      siteDocument.pages.length + 1,
-      siteDocument.pages.map((item) => item.slug),
-    );
-    commit((document) => ({
-      ...document,
-      pages: [...document.pages, page],
-    }));
-    setSelectedPageId(page.id);
-    setSelectedSectionId(page.sections[0]?.id ?? "");
-    setInspectorTab("content");
-  };
-
-  const addSection = () => {
-    if (!selectedPage) return;
-    const section = createSection(
-      "content",
-      selectedPage.sections.length + 1,
-    );
-    commit((document) => ({
-      ...document,
-      pages: document.pages.map((page) =>
-        page.id === selectedPage.id
-          ? { ...page, sections: [...page.sections, section] }
-          : page,
-      ),
-    }));
-    setSelectedSectionId(section.id);
-    setInspectorTab("content");
-  };
-
-  const updatePage = (patch: Partial<SitePage>) => {
-    if (!selectedPage) return;
-    commit((document) => ({
-      ...document,
-      pages: document.pages.map((page) =>
-        page.id === selectedPage.id ? { ...page, ...patch } : page,
-      ),
-    }));
-  };
-
-  const updateSection = (patch: Partial<SiteSection>) => {
-    if (!selectedPage || !selectedSection) return;
-    commit((document) => ({
-      ...document,
-      pages: document.pages.map((page) =>
-        page.id === selectedPage.id
-          ? {
-              ...page,
-              sections: page.sections.map((section) =>
-                section.id === selectedSection.id
-                  ? { ...section, ...patch }
-                  : section,
-              ),
-            }
-          : page,
-      ),
-    }));
-  };
-
-  const movePage = (index: number, direction: -1 | 1) => {
-    commit((document) => ({
-      ...document,
-      pages: moveItem(document.pages, index, direction),
-    }));
-  };
-
-  const moveSection = (index: number, direction: -1 | 1) => {
-    if (!selectedPage) return;
-    commit((document) => ({
-      ...document,
-      pages: document.pages.map((page) =>
-        page.id === selectedPage.id
-          ? {
-              ...page,
-              sections: moveItem(page.sections, index, direction),
-            }
-          : page,
-      ),
-    }));
-  };
-
-  const deletePage = () => {
-    if (!selectedPage || siteDocument.pages.length <= 1) return;
-    if (!window.confirm(`Delete "${selectedPage.title}"? You can undo this.`)) {
+  const setTarget = (target: ValidationIssue["target"]) => {
+    if (target === "style") {
+      setStep("style");
       return;
     }
-
-    const remaining = siteDocument.pages.filter(
-      (page) => page.id !== selectedPage.id,
-    );
-    commit((document) => ({ ...document, pages: remaining }));
-    setSelectedPageId(remaining[0]?.id ?? "");
-    setSelectedSectionId(remaining[0]?.sections[0]?.id ?? "");
-  };
-
-  const deleteSection = () => {
-    if (!selectedPage || !selectedSection) return;
-    if (
-      !window.confirm(`Delete "${selectedSection.title}"? You can undo this.`)
-    ) {
+    if (target === "launch") {
+      setStep("launch");
       return;
     }
-
-    const remaining = selectedPage.sections.filter(
-      (section) => section.id !== selectedSection.id,
-    );
-    commit((document) => ({
-      ...document,
-      pages: document.pages.map((page) =>
-        page.id === selectedPage.id
-          ? { ...page, sections: remaining }
-          : page,
-      ),
-    }));
-    setSelectedSectionId(remaining[0]?.id ?? "");
+    setStep("content");
+    setContentPanel(target);
   };
 
   const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -1046,34 +414,31 @@ export default function App() {
     event.target.value = "";
     if (!file) return;
 
-    const result = parseImportedDocument(await readFileText(file));
+    let result;
+    try {
+      result = parseImportedDocument(await readFileText(file));
+    } catch {
+      setFeedback("선택한 파일을 읽을 수 없습니다.");
+      return;
+    }
     if (!result.ok) {
       setFeedback(result.error);
       return;
     }
 
-    const confirmed = window.confirm(
-      `Import "${file.name}" and replace the current document? ` +
-        "Siteboard will download a JSON backup first. " +
-        "Importing clears Undo and Redo history and cannot be undone in the editor.",
-    );
-    if (!confirmed) {
-      setFeedback("Import cancelled. The current document was not changed.");
-      return;
-    }
-
-    const backupFilename = `${exportBasename(siteDocument.site.name)}-before-import-${safeTimestamp()}.siteboard.json`;
-    try {
+    if (started) {
+      const confirmed = window.confirm(
+        `"${file.name}" 파일을 열면 현재 내용을 교체합니다. 먼저 지금 작업 파일을 저장하고, 되돌리기 기록은 새로 시작합니다.`,
+      );
+      if (!confirmed) {
+        setFeedback("현재 홈페이지 내용을 유지했습니다.");
+        return;
+      }
       downloadText(
-        backupFilename,
-        jsonExport(siteDocument),
+        `${exportBasename(document.site.name)}-before-import-${safeTimestamp()}.siteboard.json`,
+        jsonExport(document),
         "application/json",
       );
-    } catch {
-      setFeedback(
-        "Import stopped because the pre-import JSON backup could not be downloaded.",
-      );
-      return;
     }
 
     const imported = withTimestamp(result.document);
@@ -1081,269 +446,1134 @@ export default function App() {
       allowUnsafePrimaryReplacement: true,
     });
     if (!saved.ok) {
+      setFeedback("가져온 내용을 브라우저에 저장하지 못했습니다.");
       setSaveState(saved.reason === "unsafe-primary" ? "recovery" : "error");
-      setFeedback(
-        "Import stopped because the imported document could not be saved locally.",
-      );
       return;
     }
 
+    dispatch({ type: "replace", document: imported });
+    setStarted(true);
     setAutosaveAllowed(true);
     setRecovery(null);
     setSaveState("saved");
-    dispatch({ type: "replace", document: imported });
-    setSelectedPageId(imported.pages[0]?.id ?? "");
-    setSelectedSectionId(imported.pages[0]?.sections[0]?.id ?? "");
+    setStep("content");
+    setContentPanel("identity");
     setFeedback(
-      `Imported ${file.name}. ${backupFilename} was downloaded first. Undo and Redo history were cleared.`,
+      result.migratedFrom === 1
+        ? "이전 버전의 내용을 새 형식으로 옮겼습니다. 공개 전에 내용과 연락처를 확인해 주세요."
+        : `${file.name} 내용을 열었습니다. 되돌리기 기록을 새로 시작합니다.`,
     );
   };
 
-  const selectIssue = (item: ValidationIssue) => {
-    if (item.pageId) {
-      setSelectedPageId(item.pageId);
-      const page = siteDocument.pages.find(
-        (candidate) => candidate.id === item.pageId,
-      );
-      setSelectedSectionId(item.sectionId ?? page?.sections[0]?.id ?? "");
-      setInspectorTab("content");
-    } else if (item.id.startsWith("theme-")) {
-      setInspectorTab("theme");
-    } else {
-      setInspectorTab("seo");
-    }
-  };
-
-  const resetDemo = () => {
+  const startNew = () => {
     if (
+      started &&
       !window.confirm(
-        "Replace this document with the demo? This clears Undo and Redo history and cannot be undone in the editor. Export JSON first if needed.",
+        "현재 작업 파일을 먼저 저장한 뒤 새 홈페이지를 시작합니다. 계속할까요?",
       )
     ) {
       return;
     }
-
-    const fresh = withTimestamp(cloneDocument(demoDocument));
-    const saved = saveStoredDocument(window.localStorage, fresh, {
-      allowUnsafePrimaryReplacement: true,
-    });
-    if (!saved.ok) {
-      setSaveState(saved.reason === "unsafe-primary" ? "recovery" : "error");
-      setFeedback("The demo could not be saved locally, so nothing changed.");
-      return;
+    if (started) {
+      downloadText(
+        `${exportBasename(document.site.name)}-before-new-${safeTimestamp()}.siteboard.json`,
+        jsonExport(document),
+        "application/json",
+      );
     }
-
+    const blank = createBlankDocument();
+    dispatch({ type: "replace", document: blank });
+    setStarted(true);
     setAutosaveAllowed(true);
     setRecovery(null);
-    setSaveState("saved");
-    dispatch({ type: "replace", document: fresh });
-    setSelectedPageId(fresh.pages[0]?.id ?? "");
-    setSelectedSectionId(fresh.pages[0]?.sections[0]?.id ?? "");
-    setFeedback("Demo content restored. Undo and Redo history were cleared.");
+    setSaveState("saving");
+    setStep("content");
+    setContentPanel("identity");
+    setFeedback("상호와 첫 화면 문구부터 입력하세요.");
   };
 
-  const basename = exportBasename(siteDocument.site.name);
-  const exportStatus = errorCount
-    ? `HTML export blocked by ${errorCount} ${errorCount === 1 ? "error" : "errors"}. ${errorIssues.map((item) => item.message).join(" ")}`
-    : "HTML export is ready.";
-
   const acceptRecovery = () => {
-    const saved = saveStoredDocument(window.localStorage, siteDocument, {
+    const saved = saveStoredDocument(window.localStorage, document, {
       allowUnsafePrimaryReplacement: true,
     });
     if (!saved.ok) {
-      setSaveState("recovery");
-      setFeedback(
-        "Recovery could not be completed. Download the original data before trying again.",
-      );
+      setFeedback("복구한 내용을 브라우저에 저장하지 못했습니다.");
       return;
     }
-
-    setAutosaveAllowed(true);
     setRecovery(null);
+    setAutosaveAllowed(true);
     setSaveState("saved");
-    setFeedback(
-      "Recovery copy is now active. The untouched original remains in the browser recovery slot.",
-    );
+    setFeedback("화면에 열린 내용을 새 저장본으로 사용합니다.");
   };
 
   const downloadRecovery = () => {
     if (!recovery) return;
-    const extension = recovery.kind === "future-schema" ? "json" : "txt";
     downloadText(
-      `siteboard-original-recovery-${safeTimestamp()}.${extension}`,
+      `siteboard-recovery-${safeTimestamp()}.txt`,
       recovery.raw,
-      recovery.kind === "future-schema"
-        ? "application/json"
-        : "text/plain",
+      "text/plain",
     );
-    setFeedback("The untouched original data was downloaded.");
+    setFeedback("기존 저장 데이터를 파일로 받았습니다.");
   };
 
-  const handleHtmlExport = () => {
-    if (errorCount) {
-      setInspectorTab("validation");
-      setFeedback(exportStatus);
+  const updateSite = (patch: Partial<SiteDocument["site"]>) =>
+    commit((current) => ({
+      ...current,
+      site: { ...current.site, ...patch },
+    }));
+  const updateHero = (patch: Partial<SiteDocument["hero"]>) =>
+    commit((current) => ({
+      ...current,
+      hero: { ...current.hero, ...patch },
+    }));
+
+  const renderIdentity = () => (
+    <div className="editor-stack">
+      <section className="editor-card">
+        <header>
+          <p>첫 화면</p>
+          <h3>누가 무엇을 제공하는지 적습니다.</h3>
+        </header>
+        <Field label="상호 또는 이름">
+          <input
+            value={document.site.name}
+            onChange={(event) => updateSite({ name: event.target.value })}
+          />
+        </Field>
+        <Field
+          label="한 줄 소개"
+          hint="방문자가 첫 화면에서 바로 이해할 문장을 권합니다."
+        >
+          <textarea
+            rows={2}
+            value={document.site.tagline}
+            onChange={(event) => updateSite({ tagline: event.target.value })}
+          />
+        </Field>
+        <Field label="설명">
+          <textarea
+            rows={4}
+            value={document.site.summary}
+            onChange={(event) => updateSite({ summary: event.target.value })}
+          />
+        </Field>
+        <Field label="작은 안내 문구" hint="지역, 업종, 운영 상태 등을 적을 수 있습니다.">
+          <input
+            value={document.hero.eyebrow}
+            onChange={(event) => updateHero({ eyebrow: event.target.value })}
+          />
+        </Field>
+      </section>
+
+      <section className="editor-card">
+        <header>
+          <p>이미지</p>
+          <h3>필요하면 로고와 대표 화면을 추가합니다.</h3>
+        </header>
+        <ImageUploader
+          label="로고"
+          description="선택 사항 · 없으면 상호 첫 글자를 표시합니다. PNG, JPG, WEBP · 800KB 이하"
+          asset={document.brand.logo}
+          onError={setFeedback}
+          onChange={(logo) =>
+            commit((current) => ({
+              ...current,
+              brand: { ...current.brand, logo },
+            }))
+          }
+        />
+        <ImageUploader
+          label="대표 이미지"
+          description="선택 사항 · 없으면 선택한 스타일의 색상 화면을 표시합니다. 800KB 이하"
+          asset={document.brand.heroImage}
+          onError={setFeedback}
+          onChange={(heroImage) =>
+            commit((current) => ({
+              ...current,
+              brand: { ...current.brand, heroImage },
+            }))
+          }
+        />
+        <p className="image-budget">
+          현재 이미지 {formatImageBytes(imageBytes)} / 전체{" "}
+          {formatImageBytes(MAX_DOCUMENT_IMAGE_BYTES)}
+        </p>
+      </section>
+
+      <section className="editor-card">
+        <header>
+          <p>연결</p>
+          <h3>첫 화면 버튼과 공개 주소를 정합니다.</h3>
+        </header>
+        <div className="field-grid">
+          <Field label="주요 버튼 문구">
+            <input
+              value={document.hero.primaryLabel}
+              onChange={(event) =>
+                updateHero({ primaryLabel: event.target.value })
+              }
+            />
+          </Field>
+          <Field label="주요 버튼 주소">
+            <input
+              value={document.hero.primaryUrl}
+              onChange={(event) =>
+                updateHero({ primaryUrl: event.target.value })
+              }
+            />
+          </Field>
+          <Field label="보조 버튼 문구">
+            <input
+              value={document.hero.secondaryLabel}
+              onChange={(event) =>
+                updateHero({ secondaryLabel: event.target.value })
+              }
+            />
+          </Field>
+          <Field label="보조 버튼 주소">
+            <input
+              value={document.hero.secondaryUrl}
+              onChange={(event) =>
+                updateHero({ secondaryUrl: event.target.value })
+              }
+            />
+          </Field>
+        </div>
+        <Field
+          label="공개할 홈페이지 주소 (선택)"
+          hint="배포 후 주소가 정해지면 입력해 다시 받을 수 있습니다."
+        >
+          <input
+            type="url"
+            value={document.site.baseUrl}
+            onChange={(event) => updateSite({ baseUrl: event.target.value })}
+          />
+        </Field>
+      </section>
+    </div>
+  );
+
+  const renderServices = () => (
+    <div className="editor-stack">
+      <section className="editor-card">
+        <header>
+          <p>서비스</p>
+          <h3>방문자가 선택할 수 있는 일을 적습니다.</h3>
+        </header>
+        <Field label="제목">
+          <input
+            value={document.services.heading}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                services: {
+                  ...current.services,
+                  heading: event.target.value,
+                },
+              }))
+            }
+          />
+        </Field>
+        <Field label="짧은 설명">
+          <textarea
+            rows={3}
+            value={document.services.intro}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                services: { ...current.services, intro: event.target.value },
+              }))
+            }
+          />
+        </Field>
+      </section>
+      {document.services.items.map((item, index) => (
+        <section className="editor-card item-card" key={item.id}>
+          <header>
+            <p>서비스 {index + 1}</p>
+            <button
+              type="button"
+              onClick={() =>
+                commit((current) => ({
+                  ...current,
+                  services: {
+                    ...current.services,
+                    items: current.services.items.filter(
+                      (candidate) => candidate.id !== item.id,
+                    ),
+                  },
+                }))
+              }
+            >
+              삭제
+            </button>
+          </header>
+          <Field label={`서비스 ${index + 1} 이름`}>
+            <input
+              value={item.title}
+              onChange={(event) =>
+                commit((current) => ({
+                  ...current,
+                  services: {
+                    ...current.services,
+                    items: current.services.items.map((candidate) =>
+                      candidate.id === item.id
+                        ? { ...candidate, title: event.target.value }
+                        : candidate,
+                    ),
+                  },
+                }))
+              }
+            />
+          </Field>
+          <Field label={`서비스 ${index + 1} 설명`}>
+            <textarea
+              rows={3}
+              value={item.description}
+              onChange={(event) =>
+                commit((current) => ({
+                  ...current,
+                  services: {
+                    ...current.services,
+                    items: current.services.items.map((candidate) =>
+                      candidate.id === item.id
+                        ? { ...candidate, description: event.target.value }
+                        : candidate,
+                    ),
+                  },
+                }))
+              }
+            />
+          </Field>
+        </section>
+      ))}
+      <button
+        className="add-item-button"
+        type="button"
+        onClick={() =>
+          commit((current) => ({
+            ...current,
+            services: {
+              ...current.services,
+              items: [...current.services.items, createService()],
+            },
+            layout: {
+              ...current.layout,
+              visible: {
+                ...current.layout.visible,
+                services:
+                  current.services.items.length === 0
+                    ? true
+                    : current.layout.visible.services,
+              },
+            },
+          }))
+        }
+      >
+        + 서비스 추가
+      </button>
+    </div>
+  );
+
+  const renderWork = () => (
+    <div className="editor-stack">
+      <section className="editor-card">
+        <header>
+          <p>작업과 갤러리</p>
+          <h3>완성한 일과 결과를 보여줍니다.</h3>
+        </header>
+        <Field label="제목">
+          <input
+            value={document.work.heading}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                work: { ...current.work, heading: event.target.value },
+              }))
+            }
+          />
+        </Field>
+        <Field label="짧은 설명">
+          <textarea
+            rows={3}
+            value={document.work.intro}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                work: { ...current.work, intro: event.target.value },
+              }))
+            }
+          />
+        </Field>
+      </section>
+      {document.work.items.map((item, index) => (
+        <section className="editor-card item-card" key={item.id}>
+          <header>
+            <p>작업 {index + 1}</p>
+            <button
+              type="button"
+              onClick={() =>
+                commit((current) => ({
+                  ...current,
+                  work: {
+                    ...current.work,
+                    items: current.work.items.filter(
+                      (candidate) => candidate.id !== item.id,
+                    ),
+                  },
+                }))
+              }
+            >
+              삭제
+            </button>
+          </header>
+          <ImageUploader
+            label={`작업 ${index + 1} 이미지`}
+            description="결과 화면이나 현장 사진을 올립니다."
+            asset={item.image}
+            onError={setFeedback}
+            onChange={(image) =>
+              commit((current) => ({
+                ...current,
+                work: {
+                  ...current.work,
+                  items: current.work.items.map((candidate) =>
+                    candidate.id === item.id
+                      ? { ...candidate, image }
+                      : candidate,
+                  ),
+                },
+              }))
+            }
+          />
+          <Field label={`작업 ${index + 1} 이름`}>
+            <input
+              value={item.title}
+              onChange={(event) =>
+                commit((current) => ({
+                  ...current,
+                  work: {
+                    ...current.work,
+                    items: current.work.items.map((candidate) =>
+                      candidate.id === item.id
+                        ? { ...candidate, title: event.target.value }
+                        : candidate,
+                    ),
+                  },
+                }))
+              }
+            />
+          </Field>
+          <Field label={`작업 ${index + 1} 설명`}>
+            <textarea
+              rows={4}
+              value={item.description}
+              onChange={(event) =>
+                commit((current) => ({
+                  ...current,
+                  work: {
+                    ...current.work,
+                    items: current.work.items.map((candidate) =>
+                      candidate.id === item.id
+                        ? { ...candidate, description: event.target.value }
+                        : candidate,
+                    ),
+                  },
+                }))
+              }
+            />
+          </Field>
+          <div className="field-grid">
+            <Field label="링크 문구">
+              <input
+                value={item.linkLabel}
+                onChange={(event) =>
+                  commit((current) => ({
+                    ...current,
+                    work: {
+                      ...current.work,
+                      items: current.work.items.map((candidate) =>
+                        candidate.id === item.id
+                          ? { ...candidate, linkLabel: event.target.value }
+                          : candidate,
+                      ),
+                    },
+                  }))
+                }
+              />
+            </Field>
+            <Field label="링크 주소">
+              <input
+                value={item.linkUrl}
+                onChange={(event) =>
+                  commit((current) => ({
+                    ...current,
+                    work: {
+                      ...current.work,
+                      items: current.work.items.map((candidate) =>
+                        candidate.id === item.id
+                          ? { ...candidate, linkUrl: event.target.value }
+                          : candidate,
+                      ),
+                    },
+                  }))
+                }
+              />
+            </Field>
+          </div>
+        </section>
+      ))}
+      <button
+        className="add-item-button"
+        type="button"
+        onClick={() =>
+          commit((current) => ({
+            ...current,
+            work: {
+              ...current.work,
+              items: [...current.work.items, createWork()],
+            },
+            layout: {
+              ...current.layout,
+              visible: {
+                ...current.layout.visible,
+                work:
+                  current.work.items.length === 0
+                    ? true
+                    : current.layout.visible.work,
+              },
+            },
+          }))
+        }
+      >
+        + 작업 추가
+      </button>
+    </div>
+  );
+
+  const renderAbout = () => (
+    <div className="editor-stack">
+      <section className="editor-card">
+        <header>
+          <p>소개</p>
+          <h3>경력, 방식, 장소처럼 신뢰에 필요한 정보를 적습니다.</h3>
+        </header>
+        <Field label="제목">
+          <input
+            value={document.about.heading}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                about: { ...current.about, heading: event.target.value },
+              }))
+            }
+          />
+        </Field>
+        <Field label="소개 글">
+          <textarea
+            rows={9}
+            value={document.about.body}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                about: { ...current.about, body: event.target.value },
+                layout:
+                  !current.about.body.trim() && event.target.value.trim()
+                  ? {
+                      ...current.layout,
+                      visible: { ...current.layout.visible, about: true },
+                    }
+                  : current.layout,
+              }))
+            }
+          />
+        </Field>
+      </section>
+    </div>
+  );
+
+  const renderFaq = () => (
+    <div className="editor-stack">
+      <section className="editor-card">
+        <header>
+          <p>질문과 답변</p>
+          <h3>문의 전에 자주 확인하는 내용을 정리합니다.</h3>
+        </header>
+        <Field label="제목">
+          <input
+            value={document.faq.heading}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                faq: { ...current.faq, heading: event.target.value },
+              }))
+            }
+          />
+        </Field>
+      </section>
+      {document.faq.items.map((item, index) => (
+        <section className="editor-card item-card" key={item.id}>
+          <header>
+            <p>질문 {index + 1}</p>
+            <button
+              type="button"
+              onClick={() =>
+                commit((current) => ({
+                  ...current,
+                  faq: {
+                    ...current.faq,
+                    items: current.faq.items.filter(
+                      (candidate) => candidate.id !== item.id,
+                    ),
+                  },
+                }))
+              }
+            >
+              삭제
+            </button>
+          </header>
+          <Field label={`질문 ${index + 1}`}>
+            <input
+              value={item.question}
+              onChange={(event) =>
+                commit((current) => ({
+                  ...current,
+                  faq: {
+                    ...current.faq,
+                    items: current.faq.items.map((candidate) =>
+                      candidate.id === item.id
+                        ? { ...candidate, question: event.target.value }
+                        : candidate,
+                    ),
+                  },
+                }))
+              }
+            />
+          </Field>
+          <Field label={`답변 ${index + 1}`}>
+            <textarea
+              rows={4}
+              value={item.answer}
+              onChange={(event) =>
+                commit((current) => ({
+                  ...current,
+                  faq: {
+                    ...current.faq,
+                    items: current.faq.items.map((candidate) =>
+                      candidate.id === item.id
+                        ? { ...candidate, answer: event.target.value }
+                        : candidate,
+                    ),
+                  },
+                }))
+              }
+            />
+          </Field>
+        </section>
+      ))}
+      <button
+        className="add-item-button"
+        type="button"
+        onClick={() =>
+          commit((current) => ({
+            ...current,
+            faq: {
+              ...current.faq,
+              items: [...current.faq.items, createFaq()],
+            },
+            layout: {
+              ...current.layout,
+              visible: {
+                ...current.layout.visible,
+                faq:
+                  current.faq.items.length === 0
+                    ? true
+                    : current.layout.visible.faq,
+              },
+            },
+          }))
+        }
+      >
+        + 질문 추가
+      </button>
+    </div>
+  );
+
+  const renderContact = () => (
+    <div className="editor-stack">
+      <section className="editor-card">
+        <header>
+          <p>연락</p>
+          <h3>방문자가 바로 연락할 수 있는 정보를 적습니다.</h3>
+        </header>
+        <Field label="제목">
+          <input
+            value={document.contact.heading}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                contact: { ...current.contact, heading: event.target.value },
+              }))
+            }
+          />
+        </Field>
+        <Field label="안내 문구">
+          <textarea
+            rows={4}
+            value={document.contact.message}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                contact: { ...current.contact, message: event.target.value },
+              }))
+            }
+          />
+        </Field>
+        <div className="field-grid">
+          <Field label="이메일">
+            <input
+              type="email"
+              value={document.contact.email}
+              onChange={(event) =>
+                commit((current) => ({
+                  ...current,
+                  contact: { ...current.contact, email: event.target.value },
+                }))
+              }
+            />
+          </Field>
+          <Field label="전화번호">
+            <input
+              type="tel"
+              value={document.contact.phone}
+              onChange={(event) =>
+                commit((current) => ({
+                  ...current,
+                  contact: { ...current.contact, phone: event.target.value },
+                }))
+              }
+            />
+          </Field>
+        </div>
+        <Field label="주소">
+          <input
+            value={document.contact.address}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                contact: { ...current.contact, address: event.target.value },
+              }))
+            }
+          />
+        </Field>
+        <Field label="운영 시간">
+          <textarea
+            rows={3}
+            value={document.contact.hours}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                contact: { ...current.contact, hours: event.target.value },
+              }))
+            }
+          />
+        </Field>
+      </section>
+    </div>
+  );
+
+  const renderContent = () => (
+    <>
+      <nav className="content-tabs" aria-label="내용 항목">
+        {contentPanels.map(([value, label]) => (
+          <button
+            type="button"
+            aria-pressed={contentPanel === value}
+            key={value}
+            onClick={() => setContentPanel(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+      {contentPanel === "identity" ? renderIdentity() : null}
+      {contentPanel === "services" ? renderServices() : null}
+      {contentPanel === "work" ? renderWork() : null}
+      {contentPanel === "about" ? renderAbout() : null}
+      {contentPanel === "faq" ? renderFaq() : null}
+      {contentPanel === "contact" ? renderContact() : null}
+    </>
+  );
+
+  const renderStructure = () => (
+    <div className="editor-stack">
+      <section className="editor-card">
+        <header>
+          <p>구성</p>
+          <h3>보여줄 블록과 순서를 정합니다.</h3>
+        </header>
+        <ol className="block-list">
+          {document.layout.order.map((kind, index) => (
+            <li key={kind}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={document.layout.visible[kind]}
+                  onChange={(event) =>
+                    commit((current) => ({
+                      ...current,
+                      layout: {
+                        ...current.layout,
+                        visible: {
+                          ...current.layout.visible,
+                          [kind]: event.target.checked,
+                        },
+                      },
+                    }))
+                  }
+                />
+                <span>{blockLabels[kind]}</span>
+              </label>
+              <div>
+                <button
+                  type="button"
+                  aria-label={`${blockLabels[kind]} 위로 이동`}
+                  disabled={index === 0}
+                  onClick={() =>
+                    commit((current) => ({
+                      ...current,
+                      layout: {
+                        ...current.layout,
+                        order: moveItem(current.layout.order, index, -1),
+                      },
+                    }))
+                  }
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  aria-label={`${blockLabels[kind]} 아래로 이동`}
+                  disabled={index === document.layout.order.length - 1}
+                  onClick={() =>
+                    commit((current) => ({
+                      ...current,
+                      layout: {
+                        ...current.layout,
+                        order: moveItem(current.layout.order, index, 1),
+                      },
+                    }))
+                  }
+                >
+                  ↓
+                </button>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </section>
+    </div>
+  );
+
+  const renderStyle = () => (
+    <div className="editor-stack">
+      <section className="editor-card">
+        <header>
+          <p>스타일</p>
+          <h3>완성된 화면 성격을 고릅니다.</h3>
+        </header>
+        <div className="preset-grid">
+          {(Object.keys(presetLabels) as ThemePreset[]).map((preset) => (
+            <button
+              className={`preset-card preset-card--${preset}`}
+              type="button"
+              aria-pressed={document.theme.preset === preset}
+              key={preset}
+              onClick={() =>
+                commit((current) => ({
+                  ...current,
+                  theme: { ...current.theme, preset },
+                }))
+              }
+            >
+              <span className="preset-preview" aria-hidden="true">
+                <i />
+                <b />
+                <em />
+              </span>
+              <strong>{presetLabels[preset]}</strong>
+            </button>
+          ))}
+        </div>
+        <div className="accent-field">
+          <label htmlFor="accent-color">강조색</label>
+          <input
+            type="color"
+            aria-label="강조색 선택"
+            value={
+              /^#[0-9a-f]{6}$/i.test(document.theme.accent)
+                ? document.theme.accent
+                : "#b5482d"
+            }
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                theme: { ...current.theme, accent: event.target.value },
+              }))
+            }
+          />
+          <input
+            id="accent-color"
+            value={document.theme.accent}
+            maxLength={7}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                theme: { ...current.theme, accent: event.target.value },
+              }))
+            }
+          />
+        </div>
+      </section>
+    </div>
+  );
+
+  const launchChecks = [
+    {
+      label: "사업 이름과 첫 화면 문구",
+      complete: Boolean(
+        document.site.name.trim() &&
+          document.site.tagline.trim() &&
+          document.site.summary.trim(),
+      ),
+    },
+    {
+      label: "연락 수단",
+      complete: Boolean(
+        !document.layout.visible.contact ||
+          document.contact.email.trim() ||
+          document.contact.phone.trim(),
+      ),
+    },
+    { label: "연결 주소와 내용 검사", complete: errors.length === 0 },
+  ];
+
+  const exportZip = () => {
+    if (errors.length) {
+      setFeedback(`출시 전에 ${errors.length}개 항목을 확인해 주세요.`);
       return;
     }
-
-    downloadText(
-      "index.html",
-      generateStaticHtml(siteDocument),
-      "text/html",
-    );
+    try {
+      const bytes = createDeploymentZip(document);
+      const arrayBuffer = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
+      downloadBlob(
+        `${exportBasename(document.site.name)}-website.zip`,
+        new Blob([arrayBuffer], { type: "application/zip" }),
+      );
+      setFeedback(
+        "홈페이지 파일을 저장했습니다. 압축을 푼 전체 내용을 함께 올리세요.",
+      );
+    } catch (error) {
+      setFeedback(
+        error instanceof Error ? error.message : "홈페이지 파일을 만들지 못했습니다.",
+      );
+    }
   };
+
+  const renderLaunch = () => (
+    <div className="editor-stack">
+      <section className="editor-card">
+        <header>
+          <p>검색 정보</p>
+          <h3>검색 결과와 링크 공유에 표시할 문구입니다.</h3>
+        </header>
+        <Field
+          label={`검색 결과 제목 (선택) · ${document.seo.title.length}/60`}
+          hint={`비워 두면 “${document.site.name || "사업 이름"}”을 사용합니다.`}
+        >
+          <input
+            value={document.seo.title}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                seo: { ...current.seo, title: event.target.value },
+              }))
+            }
+          />
+        </Field>
+        <Field
+          label={`검색 결과 설명 (선택) · ${document.seo.description.length}/160`}
+          hint="비워 두면 첫 화면 설명을 사용합니다."
+        >
+          <textarea
+            rows={4}
+            value={document.seo.description}
+            onChange={(event) =>
+              commit((current) => ({
+                ...current,
+                seo: { ...current.seo, description: event.target.value },
+              }))
+            }
+          />
+        </Field>
+      </section>
+
+      <section className="editor-card launch-card">
+        <header>
+          <p>출시 점검</p>
+          <h3>
+            {errors.length
+              ? `${errors.length}개 항목을 마치면 파일을 받을 수 있습니다.`
+              : "홈페이지 파일을 받을 준비가 끝났습니다."}
+          </h3>
+        </header>
+        <ul className="launch-checks">
+          {launchChecks.map((check) => (
+            <li className={check.complete ? "is-complete" : ""} key={check.label}>
+              <span aria-hidden="true">{check.complete ? "✓" : "○"}</span>
+              {check.label}
+            </li>
+          ))}
+        </ul>
+        {issues.length ? (
+          <ul className="issue-list" aria-label="출시 점검 결과">
+            {issues.map((item) => (
+              <li key={item.id}>
+                <button type="button" onClick={() => setTarget(item.target)}>
+                  <span className={item.level}>{item.level === "error" ? "필수" : "권장"}</span>
+                  {item.message}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <button
+          className="download-button"
+          type="button"
+          disabled={errors.length > 0}
+          onClick={exportZip}
+        >
+          홈페이지 파일 받기
+        </button>
+        <p className="package-note">
+          홈페이지 본문, 추가한 이미지, 올리는 방법 안내가 함께 들어갑니다.
+          공개 주소를 입력하면 검색용 주소 파일도 만듭니다.
+        </p>
+      </section>
+    </div>
+  );
 
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#workspace">
-        Skip to editor
+      <a className="skip-link" href="#editor-main">
+        편집 화면으로 이동
       </a>
+      <input
+        className="sr-only"
+        ref={importInput}
+        type="file"
+        accept="application/json,.json"
+        aria-label="Siteboard 작업 파일 선택"
+        onChange={handleImport}
+      />
 
       <header className="app-header">
-        <div className="brand-block">
-          <span className="brand-mark" aria-hidden="true">
-            S
-          </span>
-          <div>
-            <h1>Siteboard</h1>
+        <div className="brand-button" aria-label="Siteboard">
+          <span aria-hidden="true">S</span>
+          <strong>Siteboard</strong>
+        </div>
+        {started ? (
+          <>
             <p
               className={`save-status save-status--${saveState}`}
               role="status"
               aria-live="polite"
             >
               {saveState === "saving"
-                ? "Saving locally…"
+                ? "브라우저에 저장 중"
                 : saveState === "error"
-                  ? "Local save failed"
+                  ? "저장 공간을 확인해 주세요"
                   : saveState === "recovery"
-                    ? "Recovery needed — changes are not being saved"
-                    : "Saved locally"}
+                    ? "복구 선택이 필요합니다"
+                    : "브라우저에 저장됨"}
             </p>
-          </div>
-        </div>
-
-        <div className="history-actions" aria-label="Edit history">
-          <button
-            type="button"
-            disabled={!history.past.length}
-            onClick={() => {
-              setSaveState(autosaveAllowed ? "saving" : "recovery");
-              dispatch({ type: "undo" });
-            }}
-          >
-            Undo
-          </button>
-          <button
-            type="button"
-            disabled={!history.future.length}
-            onClick={() => {
-              setSaveState(autosaveAllowed ? "saving" : "recovery");
-              dispatch({ type: "redo" });
-            }}
-          >
-            Redo
-          </button>
-        </div>
-
-        <div className="document-actions" aria-label="Document actions">
-          <input
-            className="sr-only"
-            ref={importInput}
-            type="file"
-            aria-label="Choose Siteboard JSON to import"
-            accept="application/json,.json"
-            onChange={handleImport}
-          />
-          <span className="sr-only" id="import-help">
-            Import replaces the current document after confirmation, downloads
-            a JSON backup first, and clears Undo and Redo history.
-          </span>
-          <button
-            type="button"
-            aria-describedby="import-help"
-            onClick={() => importInput.current?.click()}
-          >
-            Import
-          </button>
-          <button
-            type="button"
-            onClick={() =>
-              downloadText(
-                `${basename}.siteboard.json`,
-                jsonExport(siteDocument),
-                "application/json",
-              )
-            }
-          >
-            JSON
-          </button>
-          <div className="export-control">
-            <button
-              className="primary-button"
-              type="button"
-              aria-disabled={errorCount > 0}
-              aria-describedby="export-status"
-              title="Export a standalone index.html file."
-              onClick={handleHtmlExport}
-            >
-              Export HTML
-            </button>
-            <p
-              className={`export-status ${errorCount ? "has-errors" : ""}`}
-              id="export-status"
-              role="status"
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              {exportStatus}
-            </p>
-          </div>
-          <button className="quiet-button" type="button" onClick={resetDemo}>
-            Reset demo
-          </button>
-        </div>
+            <div className="header-actions">
+              <div aria-label="되돌리기 기록">
+                <button
+                  type="button"
+                  disabled={!history.past.length}
+                  onClick={() => {
+                    setSaveState("saving");
+                    dispatch({ type: "undo" });
+                  }}
+                >
+                  되돌리기
+                </button>
+                <button
+                  type="button"
+                  disabled={!history.future.length}
+                  onClick={() => {
+                    setSaveState("saving");
+                    dispatch({ type: "redo" });
+                  }}
+                >
+                  다시 실행
+                </button>
+              </div>
+              <div aria-label="홈페이지 파일">
+                <button type="button" onClick={startNew}>
+                  새로 만들기
+                </button>
+                <button
+                  type="button"
+                  onClick={() => importInput.current?.click()}
+                >
+                  작업 파일 열기
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    downloadText(
+                      `${exportBasename(document.site.name)}.siteboard.json`,
+                      jsonExport(document),
+                      "application/json",
+                    )
+                  }
+                >
+                  작업 파일 백업
+                </button>
+              </div>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => setStep("launch")}
+              >
+                출시 준비
+              </button>
+            </div>
+          </>
+        ) : null}
       </header>
 
       {recovery ? (
-        <section
-          className="recovery-banner"
-          role="alert"
-          aria-labelledby="recovery-title"
-        >
+        <section className="recovery-banner" role="alert">
           <div>
-            <strong id="recovery-title">
+            <strong>
               {recovery.kind === "future-schema"
-                ? "This saved document was created by a newer Siteboard."
-                : "Siteboard could not read the saved document."}
+                ? "더 최신 버전에서 만든 저장 데이터가 있습니다."
+                : "브라우저 저장 데이터를 읽는 중 문제가 생겼습니다."}
             </strong>
-            <p>
-              The original has not been replaced.{" "}
-              {initialStorage.source === "backup"
-                ? "The last known-good backup is open for review."
-                : initialStorage.source === "demo"
-                  ? "The demo is open for review."
-                  : "The current in-memory copy is open for review."}{" "}
-              Changes will not be saved until you choose to use this copy.
-              {recovery.preservedInStorage
-                ? " The untouched text is also stored in the browser recovery slot."
-                : " Download the original now; the browser could not create a separate recovery slot."}
-            </p>
+            <p>기존 데이터는 그대로 보관했으며, 화면에는 복구 가능한 내용을 열었습니다.</p>
           </div>
-          <div className="recovery-actions">
+          <div>
             <button type="button" onClick={downloadRecovery}>
-              Download original data
+              기존 데이터 받기
             </button>
-            <button
-              className="primary-button"
-              type="button"
-              onClick={acceptRecovery}
-            >
-              {initialStorage.source === "backup"
-                ? "Use last valid backup"
-                : initialStorage.source === "demo"
-                  ? "Start with demo"
-                  : "Use current copy"}
+            <button className="primary-button" type="button" onClick={acceptRecovery}>
+              열린 내용 사용
             </button>
           </div>
         </section>
@@ -1353,95 +1583,73 @@ export default function App() {
         {feedback}
       </p>
 
-      <main className="workspace" id="workspace">
-        <Outline
-          pages={siteDocument.pages}
-          selectedPageId={effectivePageId}
-          selectedSectionId={effectiveSectionId}
-          onSelectPage={selectPage}
-          onSelectSection={setSelectedSectionId}
-          onAddPage={addPage}
-          onAddSection={addSection}
-          onMovePage={movePage}
-          onMoveSection={moveSection}
-          onTogglePage={(pageId) => {
-            const page = siteDocument.pages.find((item) => item.id === pageId);
-            if (page) {
-              setSelectedPageId(pageId);
-              setSelectedSectionId(page.sections[0]?.id ?? "");
-              commit((document) => ({
-                ...document,
-                pages: document.pages.map((item) =>
-                  item.id === pageId
-                    ? { ...item, hidden: !item.hidden }
-                    : item,
-                ),
-              }));
-            }
-          }}
-          onToggleSection={(sectionId) => {
-            const section = selectedPage?.sections.find(
-              (item) => item.id === sectionId,
-            );
-            if (!selectedPage || !section) return;
-            setSelectedSectionId(sectionId);
-            commit((document) => ({
-              ...document,
-              pages: document.pages.map((page) =>
-                page.id === selectedPage.id
-                  ? {
-                      ...page,
-                      sections: page.sections.map((item) =>
-                        item.id === sectionId
-                          ? { ...item, hidden: !item.hidden }
-                          : item,
-                      ),
-                    }
-                  : page,
-              ),
-            }));
-          }}
+      {!started ? (
+        <StartScreen
+          onCreate={startNew}
+          onOpen={() => importInput.current?.click()}
         />
+      ) : (
+        <main className="workspace" id="editor-main">
+          <nav className="step-nav" aria-label="홈페이지 제작 단계">
+            <p>제작 단계</p>
+            {steps.map(([value, number, label]) => (
+              <button
+                type="button"
+                aria-current={step === value ? "step" : undefined}
+                key={value}
+                onClick={() => setStep(value)}
+              >
+                <span>{number}</span>
+                {label}
+                {value === "launch" && errors.length ? (
+                  <b>{errors.length}</b>
+                ) : null}
+              </button>
+            ))}
+            <div className="progress-card">
+              <span>
+                {launchChecks.filter((item) => item.complete).length}/
+                {launchChecks.length}
+              </span>
+              <p>출시 준비 완료</p>
+              {warnings.length ? <small>권장 {warnings.length}개</small> : null}
+            </div>
+          </nav>
 
-        <Inspector
-          tab={inspectorTab}
-          onTabChange={setInspectorTab}
-          document={siteDocument}
-          selectedPage={selectedPage}
-          selectedSection={selectedSection}
-          issues={issues}
-          onUpdatePage={updatePage}
-          onUpdateSection={updateSection}
-          onUpdateTheme={(patch) =>
-            commit((document) => ({
-              ...document,
-              theme: { ...document.theme, ...patch },
-            }))
-          }
-          onUpdateSite={(patch) =>
-            commit((document) => ({
-              ...document,
-              site: { ...document.site, ...patch },
-            }))
-          }
-          onUpdateSeo={(patch) =>
-            commit((document) => ({
-              ...document,
-              seo: { ...document.seo, ...patch },
-            }))
-          }
-          onDeletePage={deletePage}
-          onDeleteSection={deleteSection}
-          onSelectIssue={selectIssue}
-        />
+          <section className="editor-panel" aria-labelledby="editor-title">
+            <header className="editor-heading">
+              <p>
+                {step === "content"
+                  ? "내용"
+                  : step === "structure"
+                    ? "구성"
+                    : step === "style"
+                      ? "스타일"
+                      : "출시"}
+              </p>
+              <h2 id="editor-title">
+                {step === "content"
+                  ? "홈페이지 내용을 채웁니다."
+                  : step === "structure"
+                    ? "보여줄 순서를 정합니다."
+                    : step === "style"
+                      ? "화면 인상을 고릅니다."
+                      : "공개할 파일을 준비합니다."}
+              </h2>
+            </header>
+            {step === "content" ? renderContent() : null}
+            {step === "structure" ? renderStructure() : null}
+            {step === "style" ? renderStyle() : null}
+            {step === "launch" ? renderLaunch() : null}
+          </section>
 
-        <Preview
-          html={previewHtml}
-          device={previewDevice}
-          onDeviceChange={setPreviewDevice}
-          pageTitle={selectedPage?.title ?? siteDocument.site.name}
-        />
-      </main>
+          <Preview
+            html={previewHtml}
+            device={device}
+            onDeviceChange={setDevice}
+          />
+        </main>
+      )}
     </div>
   );
 }

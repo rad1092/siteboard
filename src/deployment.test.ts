@@ -17,6 +17,7 @@ describe("deployment contract", () => {
     const manifest = JSON.parse(manifestText) as {
       start_url: string;
       scope: string;
+      lang: string;
       icons: Array<{ src: string }>;
     };
 
@@ -24,6 +25,8 @@ describe("deployment contract", () => {
     expect(indexHtml).toContain('href="/siteboard/manifest.webmanifest"');
     expect(manifest.start_url).toBe("/siteboard/");
     expect(manifest.scope).toBe("/siteboard/");
+    expect(manifest.lang).toBe("ko");
+    expect(indexHtml).toContain('<html lang="ko">');
     expect(manifest.icons.every((icon) => icon.src.startsWith("/siteboard/")))
       .toBe(true);
     expect(mainSource).toContain("scope: import.meta.env.BASE_URL");
@@ -55,6 +58,8 @@ describe("deployment contract", () => {
     expect(workflow).toContain("npm test");
     expect(workflow).toContain("npm run lint");
     expect(workflow).toContain("npm run build");
-    expect(workflow).toContain("actions/deploy-pages@v4");
+    expect(workflow).toMatch(
+      /actions\/deploy-pages@[a-f0-9]{40}\s+# v4/,
+    );
   });
 });

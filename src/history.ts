@@ -8,6 +8,11 @@ export interface HistoryState {
 
 export type HistoryAction =
   | { type: "commit"; document: SiteDocument }
+  | {
+      type: "update";
+      update: (document: SiteDocument) => SiteDocument;
+      updatedAt: string;
+    }
   | { type: "undo" }
   | { type: "redo" }
   | { type: "replace"; document: SiteDocument };
@@ -38,6 +43,19 @@ export function historyReducer(
     return {
       past: [...state.past, state.present].slice(-HISTORY_LIMIT),
       present: action.document,
+      future: [],
+    };
+  }
+
+  if (action.type === "update") {
+    const updated = action.update(state.present);
+    if (JSON.stringify(updated) === JSON.stringify(state.present)) {
+      return state;
+    }
+
+    return {
+      past: [...state.past, state.present].slice(-HISTORY_LIMIT),
+      present: { ...updated, updatedAt: action.updatedAt },
       future: [],
     };
   }

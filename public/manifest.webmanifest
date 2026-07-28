@@ -1,7 +1,8 @@
 {
   "name": "Siteboard",
   "short_name": "Siteboard",
-  "description": "A local-first editor for small static websites.",
+  "description": "한 장 사업 홈페이지와 배포 파일을 만드는 로컬 제작기.",
+  "lang": "ko",
   "id": "/siteboard/",
   "start_url": "/siteboard/",
   "scope": "/siteboard/",

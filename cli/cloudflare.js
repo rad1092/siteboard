@@ -1,6 +1,4 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CloudflareApiClient } from "./cloudflare-api.js";
@@ -35,6 +33,121 @@ function productionUrl(deployment) {
   return firstString(aliases[0], deployment?.alias, deployment?.url);
 }
 
+function deploymentRevision(deployment) {
+  return firstString(
+    deployment?.deployment_trigger?.metadata?.commit_hash,
+  );
+}
+
+function successfulProduction(deployment) {
+  return (
+    firstString(deployment?.environment).toLowerCase() === "production" &&
+    firstString(deployment?.latest_stage?.status).toLowerCase() === "success"
+  );
+}
+
+function normalizeOrigin(value) {
+  if (typeof value !== "string" || !value.trim()) return "";
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error("공개 주소가 올바르지 않습니다.");
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    (url.pathname !== "/" && url.pathname !== "") ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error("공개 주소는 경로가 없는 HTTPS 주소여야 합니다.");
+  }
+  return url.origin;
+}
+
+function pagesOrigin(project) {
+  if (typeof project?.subdomain !== "string" || !project.subdomain.trim()) {
+    return "";
+  }
+  return normalizeOrigin(
+    project.subdomain.includes("://")
+      ? project.subdomain
+      : `https://${project.subdomain}`,
+  );
+}
+
+function projectOrigins(project) {
+  const values = new Set();
+  values.add(pagesOrigin(project));
+  for (const domain of Array.isArray(project?.domains) ? project.domains : []) {
+    if (typeof domain === "string" && domain.trim()) {
+      values.add(
+        normalizeOrigin(`https://${domain.replace(/^https?:\/\//, "")}`),
+      );
+    }
+  }
+  for (const alias of Array.isArray(project?.canonical_deployment?.aliases)
+    ? project.canonical_deployment.aliases
+    : []) {
+    if (typeof alias === "string" && alias.trim()) {
+      values.add(normalizeOrigin(alias));
+    }
+  }
+  return [...values].filter(Boolean);
+}
+
+function deploymentResult(
+  row,
+  accountId,
+  projectId,
+  createdProject,
+  revision,
+  target,
+) {
+  return {
+    accountId,
+    projectId,
+    createdProject,
+    deploymentId: firstString(row?.id, row?.deployment_id),
+    deploymentUrl: firstString(row?.url),
+    productionUrl: productionUrl(row),
+    environment: firstString(row?.environment, "production"),
+    revision,
+    reconciled: true,
+    target,
+  };
+}
+
+function projectTarget(project, {
+  accountId,
+  projectName,
+  publicOrigin = "",
+}) {
+  const origins = projectOrigins(project);
+  return {
+    accountId,
+    projectName,
+    projectId: firstString(project?.id),
+    exists: Boolean(project),
+    publicOrigin: normalizeOrigin(publicOrigin),
+    origins,
+    pagesOrigin: pagesOrigin(project),
+    currentDeploymentId: firstString(project?.canonical_deployment?.id),
+    currentUrl: productionUrl(project?.canonical_deployment),
+    currentRevision: deploymentRevision(project?.canonical_deployment),
+  };
+}
+
+export class RemoteOutcomeUnknownError extends Error {
+  constructor(message, { cause } = {}) {
+    super(message, { cause });
+    this.name = "RemoteOutcomeUnknownError";
+  }
+}
+
 export function validateProjectName(projectName) {
   if (
     typeof projectName !== "string" ||
@@ -62,9 +175,12 @@ export class CloudflarePagesService {
   constructor({
     runner = createWranglerRunner(),
     apiClient = new CloudflareApiClient(),
+    wait = (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
   } = {}) {
     this.runner = runner;
     this.apiClient = apiClient;
+    this.wait = wait;
   }
 
   async authStatus() {
@@ -137,42 +253,214 @@ export class CloudflarePagesService {
     return Array.isArray(projects) ? projects : [];
   }
 
-  async ensureProject(projectName, accountId) {
-    const projects = await this.listProjects(accountId);
-    const exists = projects.some(
-      (project) =>
-        project?.name === projectName ||
-        project?.Name === projectName ||
-        project?.["Project Name"] === projectName,
-    );
-    if (exists) return false;
-
-    await this.runner.run(
-      [
-        "pages",
-        "project",
-        "create",
+  async projectOrNull(accountId, projectName, credentials) {
+    try {
+      return await this.apiClient.getProject({
+        accountId,
         projectName,
-        "--production-branch",
-        "main",
-      ],
-      {
-        env: { CLOUDFLARE_ACCOUNT_ID: accountId },
-        timeoutMs: 60_000,
-      },
-    );
-    return true;
+        credentials,
+      });
+    } catch (error) {
+      if (error?.status === 404) return null;
+      throw error;
+    }
   }
 
-  async publish({ directory, projectName, revision }) {
+  async inspectTarget({ projectName, publicOrigin = "" }) {
     validateProjectName(projectName);
     const accountId = await this.requireAccount();
-    const createdProject = await this.ensureProject(projectName, accountId);
-    const outputDirectory = await mkdtemp(
-      join(tmpdir(), "siteboard-wrangler-"),
+    const credentials = await this.credentials();
+    const project = await this.projectOrNull(
+      accountId,
+      projectName,
+      credentials,
     );
-    const outputPath = join(outputDirectory, "output.jsonl");
+    const normalizedOrigin = normalizeOrigin(publicOrigin);
+    if (project && !firstString(project.id)) {
+      throw new Error("Cloudflare 프로젝트 ID를 확인하지 못했습니다.");
+    }
+    const origins = projectOrigins(project);
+    if (normalizedOrigin && project && !origins.includes(normalizedOrigin)) {
+      throw new Error(
+        "공개 주소가 이 Cloudflare Pages 프로젝트에 연결되어 있지 않습니다.",
+      );
+    }
+    if (normalizedOrigin && !project) {
+      throw new Error(
+        "새 프로젝트는 첫 배포 뒤 발급된 pages.dev 주소를 확인하고 공개 주소를 연결하세요.",
+      );
+    }
+    return projectTarget(project, {
+      accountId,
+      projectName,
+      publicOrigin: normalizedOrigin,
+    });
+  }
 
+  async ensureBoundProject(binding, accountId, credentials) {
+    if (
+      !binding ||
+      binding.provider !== "cloudflare-pages" ||
+      binding.accountId !== accountId ||
+      binding.projectName !== validateProjectName(binding.projectName) ||
+      typeof binding.existedWhenBound !== "boolean" ||
+      typeof binding.projectId !== "string" ||
+      (binding.existedWhenBound
+        ? !binding.projectId.trim()
+        : binding.projectId !== "")
+    ) {
+      throw new Error("Cloudflare 배포 대상을 다시 확인해 연결하세요.");
+    }
+    const project = await this.projectOrNull(
+      accountId,
+      binding.projectName,
+      credentials,
+    );
+    if (project) {
+      if (!binding.existedWhenBound) {
+        throw new Error(
+          "확인 뒤 같은 이름의 프로젝트가 생겼습니다. 배포 대상을 다시 연결하세요.",
+        );
+      }
+      if (
+        !firstString(project.id) ||
+        firstString(project.id) !== binding.projectId
+      ) {
+        throw new Error(
+          "연결했던 Cloudflare 프로젝트가 바뀌었습니다. 배포 대상을 다시 연결하세요.",
+        );
+      }
+      const normalizedOrigin = normalizeOrigin(binding.publicOrigin);
+      if (
+        normalizedOrigin &&
+        !projectOrigins(project).includes(normalizedOrigin)
+      ) {
+        throw new Error(
+          "공개 주소가 이 Cloudflare Pages 프로젝트에 연결되어 있지 않습니다.",
+        );
+      }
+      return { project, createdProject: false };
+    }
+    if (binding.existedWhenBound) {
+      throw new Error(
+        "연결했던 Cloudflare 프로젝트를 찾지 못했습니다. 배포 대상을 다시 연결하세요.",
+      );
+    }
+    if (normalizeOrigin(binding.publicOrigin)) {
+      throw new Error(
+        "새 프로젝트의 공개 주소는 첫 배포 뒤 다시 연결하세요.",
+      );
+    }
+
+    try {
+      await this.runner.run(
+        [
+          "pages",
+          "project",
+          "create",
+          binding.projectName,
+          "--production-branch",
+          "main",
+        ],
+        {
+          env: { CLOUDFLARE_ACCOUNT_ID: accountId },
+          timeoutMs: 60_000,
+        },
+      );
+    } catch (error) {
+      throw new RemoteOutcomeUnknownError(
+        "Cloudflare 프로젝트 생성 결과를 확정하지 못했습니다. 배포 대상을 다시 확인하세요.",
+        { cause: error },
+      );
+    }
+
+    let lastError = null;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const created = await this.projectOrNull(
+          accountId,
+          binding.projectName,
+          credentials,
+        );
+        if (created && firstString(created.id)) {
+          return { project: created, createdProject: true };
+        }
+      } catch (error) {
+        lastError = error;
+      }
+      if (attempt < 3) await this.wait(200 * (attempt + 1));
+    }
+    throw new RemoteOutcomeUnknownError(
+      "Cloudflare 프로젝트는 생성됐지만 프로젝트 ID를 확정하지 못했습니다. 배포 대상을 다시 확인하세요.",
+      { cause: lastError ?? undefined },
+    );
+  }
+
+  async findCanonicalDeploymentByRevision({
+    accountId,
+    projectName,
+    credentials,
+    revision,
+    projectId,
+    previousDeploymentId,
+    publicOrigin,
+    createdProject,
+  }) {
+    const commitHash = revision.slice(0, 40);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const project = await this.projectOrNull(
+        accountId,
+        projectName,
+        credentials,
+      ).catch(() => null);
+      const canonical = project?.canonical_deployment;
+      const canonicalProjectId = firstString(canonical?.project_id);
+      if (
+        firstString(project?.id) === projectId &&
+        successfulProduction(canonical) &&
+        firstString(canonical?.id) &&
+        firstString(canonical?.id) !== previousDeploymentId &&
+        (!canonicalProjectId || canonicalProjectId === projectId) &&
+        deploymentRevision(canonical) === commitHash &&
+        (!normalizeOrigin(publicOrigin) ||
+          projectOrigins(project).includes(normalizeOrigin(publicOrigin)))
+      ) {
+        const target = projectTarget(project, {
+          accountId,
+          projectName,
+          publicOrigin,
+        });
+        return deploymentResult(
+          canonical,
+          accountId,
+          projectId,
+          createdProject,
+          revision,
+          target,
+        );
+      }
+      if (attempt < 4) await this.wait(250 * (attempt + 1));
+    }
+    return null;
+  }
+
+  async publish({ directory, binding, revision }) {
+    const projectName = validateProjectName(binding?.projectName ?? "");
+    if (typeof revision !== "string" || !/^[a-f0-9]{64}$/.test(revision)) {
+      throw new Error("배포 리비전이 올바르지 않습니다.");
+    }
+    const accountId = await this.requireAccount();
+    const credentials = await this.credentials();
+    const { project, createdProject } = await this.ensureBoundProject(
+      binding,
+      accountId,
+      credentials,
+    );
+    const projectId = firstString(project?.id);
+    const previousDeploymentId = firstString(
+      project?.canonical_deployment?.id,
+    );
+    let commandError = null;
     try {
       await this.runner.run(
         [
@@ -190,39 +478,63 @@ export class CloudflarePagesService {
           "--commit-dirty=false",
         ],
         {
-          env: {
-            CLOUDFLARE_ACCOUNT_ID: accountId,
-            WRANGLER_OUTPUT_FILE_PATH: outputPath,
-          },
+          env: { CLOUDFLARE_ACCOUNT_ID: accountId },
           timeoutMs: 240_000,
         },
       );
-
-      const output = await readFile(outputPath, "utf8");
-      const events = output
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((line) => JSON.parse(line));
-      const detailed = events.findLast(
-        (event) => event.type === "pages-deploy-detailed",
-      );
-      const basic = events.findLast((event) => event.type === "pages-deploy");
-      const event = detailed ?? basic;
-      if (!event?.deployment_id || !event?.url) {
-        throw new Error("Cloudflare 배포 결과에 배포 ID와 주소가 없습니다.");
-      }
-
-      return {
-        accountId,
-        createdProject,
-        deploymentId: event.deployment_id,
-        deploymentUrl: event.url,
-        productionUrl: firstString(event.alias, event.url),
-        environment: firstString(event.environment, "production"),
-      };
-    } finally {
-      await rm(outputDirectory, { recursive: true, force: true });
+    } catch (error) {
+      commandError = error;
     }
+
+    const reconciled = await this.findCanonicalDeploymentByRevision({
+      accountId,
+      projectName,
+      credentials,
+      revision,
+      projectId,
+      previousDeploymentId,
+      publicOrigin: binding.publicOrigin,
+      createdProject,
+    }).catch(() => null);
+    if (reconciled) return reconciled;
+    throw new RemoteOutcomeUnknownError(
+      "Cloudflare가 새 production 배포를 적용했는지 확정하지 못했습니다. 배포 이력을 새로 확인하세요.",
+      { cause: commandError ?? undefined },
+    );
+  }
+
+  async confirmCanonical({ binding, deploymentId, revision }) {
+    if (
+      typeof deploymentId !== "string" ||
+      !/^[A-Za-z0-9-]{8,128}$/.test(deploymentId) ||
+      typeof revision !== "string" ||
+      !/^[a-f0-9]{64}$/.test(revision)
+    ) {
+      throw new Error("확인할 production 배포 정보가 올바르지 않습니다.");
+    }
+    const accountId = await this.requireAccount();
+    const credentials = await this.credentials();
+    const { project } = await this.ensureBoundProject(
+      binding,
+      accountId,
+      credentials,
+    );
+    const projectId = firstString(project?.id);
+    const canonical = project?.canonical_deployment;
+    const canonicalProjectId = firstString(canonical?.project_id);
+    if (
+      firstString(canonical?.id) !== deploymentId ||
+      !successfulProduction(canonical) ||
+      deploymentRevision(canonical) !== revision.slice(0, 40) ||
+      (canonicalProjectId && canonicalProjectId !== projectId)
+    ) {
+      return null;
+    }
+    return projectTarget(project, {
+      accountId,
+      projectName: binding.projectName,
+      publicOrigin: binding.publicOrigin,
+    });
   }
 
   async listDeployments(projectName) {
@@ -243,10 +555,7 @@ export class CloudflarePagesService {
     for (const row of [canonical, ...rows]) {
       const id = firstString(row?.id);
       if (!id || unique.has(id)) continue;
-      if (
-        firstString(row?.environment).toLowerCase() !== "production" ||
-        firstString(row?.latest_stage?.status).toLowerCase() !== "success"
-      ) {
+      if (!successfulProduction(row)) {
         continue;
       }
       unique.set(id, row);
@@ -260,15 +569,14 @@ export class CloudflarePagesService {
       )
       .map((row) => {
         const deploymentId = firstString(row.id);
-        const commitHash = firstString(
-          row?.deployment_trigger?.metadata?.commit_hash,
-        );
+        const commitHash = deploymentRevision(row);
         const current = deploymentId === currentId;
         return {
           deploymentId,
-          url: productionUrl(row),
+          url: firstString(row?.url),
           status: "success",
           source: commitHash ? commitHash.slice(0, 12) : firstString(row.short_id),
+          revision: commitHash,
           environment: "Production",
           dashboardUrl:
             `https://dash.cloudflare.com/${encodeURIComponent(accountId)}` +
@@ -288,7 +596,8 @@ export class CloudflarePagesService {
     return parseJsonOutput(result.stdout, "Cloudflare 인증");
   }
 
-  async rollback({ projectName, deploymentId }) {
+  async rollback({ binding, deploymentId, verifyTarget }) {
+    const projectName = validateProjectName(binding?.projectName ?? "");
     validateProjectName(projectName);
     if (
       typeof deploymentId !== "string" ||
@@ -297,18 +606,110 @@ export class CloudflarePagesService {
       throw new Error("되돌릴 배포 ID가 올바르지 않습니다.");
     }
     const accountId = await this.requireAccount();
-    const deployment = await this.apiClient.rollbackDeployment({
+    const credentials = await this.credentials();
+    if (!binding || !binding.existedWhenBound) {
+      throw new Error("Cloudflare 배포 대상을 다시 확인해 연결하세요.");
+    }
+    const { project: boundProject } = await this.ensureBoundProject(
+      binding,
+      accountId,
+      credentials,
+    );
+    const projectId = firstString(boundProject?.id);
+    const deployments = await this.apiClient.listProductionDeployments({
       accountId,
       projectName,
-      deploymentId,
-      credentials: await this.credentials(),
+      credentials,
     });
-    return {
-      accountId,
-      deploymentId: firstString(deployment.id, deploymentId),
-      deploymentUrl: firstString(deployment.url),
-      productionUrl: productionUrl(deployment),
-      environment: firstString(deployment.environment, "production"),
-    };
+    const target = deployments.find(
+      (deployment) =>
+        firstString(deployment?.id) === deploymentId &&
+        successfulProduction(deployment) &&
+        firstString(deployment?.id) !==
+          firstString(boundProject?.canonical_deployment?.id) &&
+        (!firstString(deployment?.project_id) ||
+          firstString(deployment?.project_id) === projectId),
+    );
+    if (!target) {
+      throw new Error(
+        "복구 대상은 성공한 production 배포 이력에서 다시 선택하세요.",
+      );
+    }
+    const targetRevision = deploymentRevision(target);
+    const immutableUrl = firstString(target?.url);
+    if (
+      !/^[a-f0-9]{40}$/.test(targetRevision) ||
+      !immutableUrl
+    ) {
+      throw new Error("복구 대상의 리비전을 확인하지 못했습니다.");
+    }
+    if (typeof verifyTarget !== "function") {
+      throw new Error("복구 대상 파일을 확인할 수 없습니다.");
+    }
+    const preflight = await verifyTarget({
+      deploymentUrl: normalizeOrigin(immutableUrl),
+      commitHash: targetRevision,
+    });
+    if (
+      !preflight?.ok ||
+      typeof preflight.revision !== "string" ||
+      !/^[a-f0-9]{64}$/.test(preflight.revision) ||
+      !preflight.revision.startsWith(targetRevision)
+    ) {
+      throw new Error(
+        "선택한 고정 배포 주소의 리비전을 확인하지 못해 복구를 중단했습니다.",
+      );
+    }
+
+    let rollbackError = null;
+    try {
+      await this.apiClient.rollbackDeployment({
+        accountId,
+        projectName,
+        deploymentId,
+        credentials,
+      });
+    } catch (error) {
+      if (typeof error?.status === "number" && error.status < 500) {
+        throw error;
+      }
+      rollbackError = error;
+    }
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const project = await this.projectOrNull(
+        accountId,
+        projectName,
+        credentials,
+      ).catch(() => null);
+      const canonical = project?.canonical_deployment;
+      const canonicalProjectId = firstString(canonical?.project_id);
+      if (
+        firstString(project?.id) === projectId &&
+        firstString(canonical?.id) === deploymentId &&
+        successfulProduction(canonical) &&
+        (!canonicalProjectId || canonicalProjectId === projectId) &&
+        deploymentRevision(canonical) === targetRevision
+      ) {
+        const targetState = projectTarget(project, {
+          accountId,
+          projectName,
+          publicOrigin: binding.publicOrigin,
+        });
+        return deploymentResult(
+          canonical,
+          accountId,
+          projectId,
+          false,
+          preflight.revision,
+          targetState,
+        );
+      }
+      if (attempt < 4) await this.wait(250 * (attempt + 1));
+    }
+    throw new RemoteOutcomeUnknownError(
+      "Cloudflare 복구 결과를 확정하지 못했습니다. 현재 production을 새로 확인하세요.",
+      { cause: rollbackError ?? undefined },
+    );
   }
 }

@@ -78,9 +78,11 @@ export function createStudioServer({
   staticDirectory,
   operations,
   csrfToken = randomBytes(32).toString("base64url"),
+  startupProject = null,
 }) {
   let expectedOrigin = "";
   let expectedHost = "";
+  let pendingStartupProject = startupProject;
 
   const server = createServer(async (request, response) => {
     securityHeaders(response);
@@ -118,11 +120,29 @@ export function createStudioServer({
           cloudflare: await operations.status(),
           capabilities: {
             publish: true,
+            binding: true,
             history: true,
             rollback: true,
             liveVerify: true,
           },
+          startupFile: pendingStartupProject?.fileName ?? "",
         });
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        requestUrl.pathname === "/api/startup-project"
+      ) {
+        if (!pendingStartupProject) {
+          sendJson(response, 404, {
+            error: "시작할 작업 파일이 없습니다.",
+          });
+          return;
+        }
+        const project = pendingStartupProject;
+        pendingStartupProject = null;
+        sendJson(response, 200, project);
         return;
       }
 
@@ -146,6 +166,18 @@ export function createStudioServer({
             response,
             200,
             await operations.deploymentState(projectName),
+          );
+          return;
+        }
+
+        if (
+          request.method === "POST" &&
+          requestUrl.pathname === "/api/project-target"
+        ) {
+          sendJson(
+            response,
+            200,
+            await operations.inspectTarget(await readJson(request)),
           );
           return;
         }

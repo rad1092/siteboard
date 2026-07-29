@@ -5,9 +5,19 @@ import {
   DOCUMENT_RECOVERY_KEY,
   DOCUMENT_STORAGE_KEY,
   LEGACY_DOCUMENT_STORAGE_KEY,
+  PROJECT_BACKUP_KEY,
+  PROJECT_RECOVERY_KEY,
+  PROJECT_STORAGE_KEY,
+  loadStoredProject,
   loadStoredDocument,
+  saveStoredProject,
   saveStoredDocument,
 } from "./storage";
+import {
+  createSnapshot,
+  emptyWorkspace,
+  exportProjectFile,
+} from "./project-file";
 import { completeDocument } from "./test/fixture";
 
 const legacyV1 = {
@@ -54,6 +64,35 @@ const legacyV1 = {
 };
 
 describe("브라우저 문서 저장", () => {
+  it("문서, 배포 연결, 편집 저장본을 하나의 project envelope로 저장한다", () => {
+    const document = completeDocument();
+    const binding = {
+      provider: "cloudflare-pages" as const,
+      accountId: "account-1",
+      projectName: "corner-workshop",
+      projectId: "project-1",
+      publicOrigin: "https://corner.example",
+      existedWhenBound: true,
+      boundAt: "2026-07-29T00:00:00.000Z",
+    };
+    expect(
+      saveStoredProject(localStorage, document, {
+        schemaVersion: 1,
+        binding,
+        snapshots: [createSnapshot(document, "배포 전")],
+        lastDeployment: null,
+      }),
+    ).toEqual({ ok: true });
+
+    const loaded = loadStoredProject(localStorage);
+    expect(loaded.document.site.name).toBe("모서리 공방");
+    expect(loaded.workspace.binding).toEqual(binding);
+    expect(loaded.workspace.snapshots[0].name).toBe("배포 전");
+    expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toContain(
+      '"fileType": "siteboard-project"',
+    );
+  });
+
   it("v2 기본 저장본을 읽는다", () => {
     const document = completeDocument();
     document.site.name = "기본 저장본";
@@ -138,5 +177,103 @@ describe("브라우저 문서 저장", () => {
     expect(
       JSON.parse(localStorage.getItem(DOCUMENT_STORAGE_KEY) ?? "{}").site.name,
     ).toBe("현재");
+  });
+
+  it("손상된 project 원본을 전용 복구 키에 보존하고 정상 project 백업을 연다", () => {
+    const raw = '{"fileType":"siteboard-project","broken":';
+    const backup = completeDocument();
+    backup.site.name = "정상 작업 백업";
+    localStorage.setItem(PROJECT_STORAGE_KEY, raw);
+    localStorage.setItem(
+      PROJECT_BACKUP_KEY,
+      exportProjectFile(backup, emptyWorkspace()),
+    );
+
+    const result = loadStoredProject(localStorage);
+
+    expect(result.source).toBe("backup");
+    expect(result.document.site.name).toBe("정상 작업 백업");
+    expect(result.recovery).toEqual({
+      kind: "corrupt",
+      raw,
+      preservedInStorage: true,
+    });
+    expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBe(raw);
+    expect(localStorage.getItem(PROJECT_RECOVERY_KEY)).toBe(raw);
+  });
+
+  it("기본 project 슬롯이 비어 있으면 정상 project 백업을 연다", () => {
+    const backup = completeDocument();
+    backup.site.name = "남아 있는 작업 백업";
+    localStorage.setItem(
+      PROJECT_BACKUP_KEY,
+      exportProjectFile(backup, emptyWorkspace()),
+    );
+
+    const result = loadStoredProject(localStorage);
+
+    expect(result.source).toBe("backup");
+    expect(result.document.site.name).toBe("남아 있는 작업 백업");
+    expect(result.recovery).toBeNull();
+  });
+
+  it("더 최신 project envelope를 future-schema로 보존한다", () => {
+    const raw = JSON.stringify({
+      fileType: "siteboard-project",
+      fileSchemaVersion: 2,
+      futureField: "keep exactly",
+    });
+    localStorage.setItem(PROJECT_STORAGE_KEY, raw);
+
+    const result = loadStoredProject(localStorage);
+
+    expect(result.source).toBe("starter");
+    expect(result.recovery).toEqual({
+      kind: "future-schema",
+      raw,
+      preservedInStorage: true,
+    });
+    expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBe(raw);
+    expect(localStorage.getItem(PROJECT_RECOVERY_KEY)).toBe(raw);
+  });
+
+  it("복구 키 기록에 실패하면 승인된 교체도 원본 project를 덮지 않는다", () => {
+    const raw = "{damaged-project";
+    const values = new Map<string, string>([
+      [PROJECT_STORAGE_KEY, raw],
+    ]);
+    const storage = {
+      get length() {
+        return values.size;
+      },
+      clear() {
+        values.clear();
+      },
+      getItem(key: string) {
+        return values.get(key) ?? null;
+      },
+      key(index: number) {
+        return [...values.keys()][index] ?? null;
+      },
+      removeItem(key: string) {
+        values.delete(key);
+      },
+      setItem(key: string, value: string) {
+        if (key === PROJECT_RECOVERY_KEY) {
+          throw new Error("quota");
+        }
+        values.set(key, value);
+      },
+    } satisfies Storage;
+
+    expect(
+      saveStoredProject(
+        storage,
+        completeDocument(),
+        emptyWorkspace(),
+        { allowUnsafePrimaryReplacement: true },
+      ),
+    ).toEqual({ ok: false, reason: "storage-error" });
+    expect(storage.getItem(PROJECT_STORAGE_KEY)).toBe(raw);
   });
 });

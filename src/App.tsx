@@ -10,7 +10,9 @@ import {
 import { createDeploymentZip } from "./archive";
 import {
   detectCompanion,
+  inspectCloudflareTarget,
   loadDeploymentState,
+  loadStartupProject,
   publishWithCompanion,
   rollbackWithCompanion,
   type CompanionStatus,
@@ -26,26 +28,26 @@ import {
 } from "./data";
 import { createHistory, historyReducer } from "./history";
 import {
-  CURRENT_PROJECT_STORAGE_KEY,
-  createProjectSummary,
-  loadProjects,
-  projectWithDeployment,
-  saveProjects,
-  upsertProject,
-  type SiteProjectSummary,
-} from "./projects";
+  addSnapshot,
+  createSnapshot,
+  emptyWorkspace,
+  exportProjectFile as serializeProjectFile,
+  isValidProjectName,
+  normalizePublicOrigin,
+  parseProjectFile,
+  type CloudflareProjectBinding,
+  type WorkspaceState,
+} from "./project-file";
 import {
   generateStaticHtml,
   imageAssetFromDataUrl,
-  jsonExport,
   MAX_DOCUMENT_IMAGE_BYTES,
-  parseImportedDocument,
   presetLabels,
   validateDocument,
 } from "./site";
 import {
-  loadStoredDocument,
-  saveStoredDocument,
+  loadStoredProject,
+  saveStoredProject,
   type StorageRecovery,
 } from "./storage";
 import type {
@@ -69,7 +71,7 @@ type CompanionState = "checking" | "available" | "unavailable";
 type DeploymentActionState = "idle" | "publishing" | "rolling-back";
 
 const STUDIO_RELEASE_URL =
-  "https://github.com/rad1092/siteboard/releases/tag/v3.0.0";
+  "https://github.com/rad1092/siteboard/releases/latest";
 
 const steps: Array<[EditorStep, string, string]> = [
   ["content", "1", "내용"],
@@ -255,11 +257,16 @@ function deploymentStatusLabel(record: DeploymentRecord | null): string {
   if (record.status === "verification-failed") return "배포됨 · 응답 확인 필요";
   if (record.status === "recovery-failed") return "복구됨 · 응답 확인 필요";
   if (record.status === "rollback-failed") return "복구 실패";
+  if (record.status === "outcome-unknown") return "배포 결과 확인 필요";
+  if (record.status === "rollback-outcome-unknown") {
+    return "복구 결과 확인 필요";
+  }
   return "배포 실패";
 }
 
 function ProjectDashboard({
-  project,
+  document,
+  workspace,
   hasExistingProject,
   companionState,
   companion,
@@ -268,7 +275,8 @@ function ProjectDashboard({
   onOpen,
   onExport,
 }: {
-  project: SiteProjectSummary;
+  document: SiteDocument;
+  workspace: WorkspaceState;
   hasExistingProject: boolean;
   companionState: CompanionState;
   companion: CompanionStatus | null;
@@ -277,7 +285,8 @@ function ProjectDashboard({
   onOpen: () => void;
   onExport: () => void;
 }) {
-  const lastDeployment = project.lastDeployment;
+  const lastDeployment = workspace.lastDeployment;
+  const binding = workspace.binding;
   return (
     <main className="start-screen" id="dashboard">
       <header className="dashboard-heading">
@@ -289,9 +298,9 @@ function ProjectDashboard({
       <section className="recent-projects" aria-labelledby="recent-title">
         <div className="dashboard-section-heading">
           <div>
-            <p>최근 프로젝트</p>
+            <p>현재 작업</p>
             <h2 id="recent-title">
-              {hasExistingProject ? "이어서 관리할 홈페이지" : "첫 홈페이지 만들기"}
+              {hasExistingProject ? "이어서 편집할 홈페이지" : "첫 홈페이지 만들기"}
             </h2>
           </div>
           <div className="start-actions">
@@ -316,8 +325,12 @@ function ProjectDashboard({
                 aria-hidden="true"
               />
               <div>
-                <strong>{project.name}</strong>
-                <p>{project.pagesProject}.pages.dev</p>
+                <strong>{document.site.name.trim() || "이름 없는 홈페이지"}</strong>
+                <p>
+                  {binding
+                    ? binding.publicOrigin || `${binding.projectName}.pages.dev`
+                    : "Cloudflare 배포 대상 미연결"}
+                </p>
               </div>
             </div>
             <dl>
@@ -330,7 +343,7 @@ function ProjectDashboard({
                 <dd>
                   {new Intl.DateTimeFormat("ko-KR", {
                     dateStyle: "medium",
-                  }).format(new Date(project.documentUpdatedAt))}
+                  }).format(new Date(document.updatedAt))}
                 </dd>
               </div>
               <div>
@@ -439,7 +452,7 @@ function Preview({
 
 export default function App() {
   const [initialStorage] = useState(() =>
-    loadStoredDocument(window.localStorage),
+    loadStoredProject(window.localStorage),
   );
   const [history, dispatch] = useReducer(
     historyReducer,
@@ -447,17 +460,9 @@ export default function App() {
     createHistory,
   );
   const document = history.present;
-  const [projects, setProjects] = useState(() =>
-    loadProjects(window.localStorage),
+  const [workspaceState, setWorkspaceState] = useState<WorkspaceState>(() =>
+    initialStorage.workspace,
   );
-  const [project, setProject] = useState<SiteProjectSummary>(() => {
-    const currentId = window.localStorage.getItem(
-      CURRENT_PROJECT_STORAGE_KEY,
-    );
-    const previous =
-      projects.find((candidate) => candidate.id === currentId) ?? projects[0];
-    return createProjectSummary(initialStorage.document, previous);
-  });
   const [hasExistingProject, setHasExistingProject] = useState(
     initialStorage.source !== "starter",
   );
@@ -495,7 +500,10 @@ export default function App() {
   });
   const [deploymentAction, setDeploymentAction] =
     useState<DeploymentActionState>("idle");
-  const [pagesProject, setPagesProject] = useState(project.pagesProject);
+  const [pagesProject, setPagesProject] = useState(
+    workspaceState.binding?.projectName ?? "",
+  );
+  const [snapshotName, setSnapshotName] = useState("");
   const importInput = useRef<HTMLInputElement>(null);
 
   const issues = useMemo(() => validateDocument(document), [document]);
@@ -518,24 +526,61 @@ export default function App() {
     });
   };
 
-  const storeProject = (
-    nextProject: SiteProjectSummary,
-    nextProjects = projects,
-  ) => {
-    const updatedProjects = upsertProject(nextProjects, nextProject);
-    saveProjects(window.localStorage, updatedProjects);
-    window.localStorage.setItem(CURRENT_PROJECT_STORAGE_KEY, nextProject.id);
-    setProject(nextProject);
-    setProjects(updatedProjects);
-    setHasExistingProject(true);
+  const storeWorkspace = (next: WorkspaceState) => {
+    if (!saveStoredProject(window.localStorage, document, next).ok) {
+      setFeedback("작업 연결과 저장본을 브라우저에 저장하지 못했습니다.");
+      return false;
+    }
+    setWorkspaceState(next);
+    return true;
   };
 
   useEffect(() => {
     let active = true;
-    detectCompanion().then((detected) => {
+    detectCompanion().then(async (detected) => {
       if (!active) return;
       setCompanion(detected);
       setCompanionState(detected ? "available" : "unavailable");
+      if (!detected?.startupFile) return;
+      try {
+        const startup = await loadStartupProject();
+        const result = parseProjectFile(startup.content);
+        if (!result.ok) {
+          setFeedback(result.error);
+          return;
+        }
+        const imported = withTimestamp(result.project.document);
+        const nextWorkspace: WorkspaceState = {
+          schemaVersion: 1,
+          binding: result.project.binding,
+          snapshots: result.project.snapshots,
+          lastDeployment: result.project.lastDeployment,
+        };
+        const saved = saveStoredProject(
+          window.localStorage,
+          imported,
+          nextWorkspace,
+          { allowUnsafePrimaryReplacement: true },
+        );
+        if (!saved.ok || !active) {
+          setFeedback("시작 작업 파일을 브라우저에 저장하지 못했습니다.");
+          return;
+        }
+        dispatch({ type: "replace", document: imported });
+        setWorkspaceState(nextWorkspace);
+        setPagesProject(nextWorkspace.binding?.projectName ?? "");
+        setStarted(true);
+        setAutosaveAllowed(true);
+        setHasExistingProject(true);
+        setSaveState("saved");
+        setFeedback(`${startup.fileName} 작업 파일을 Studio에서 열었습니다.`);
+      } catch (error) {
+        setFeedback(
+          error instanceof Error
+            ? error.message
+            : "시작 작업 파일을 열지 못했습니다.",
+        );
+      }
     });
     return () => {
       active = false;
@@ -545,28 +590,16 @@ export default function App() {
   useEffect(() => {
     if (!started || !autosaveAllowed) return;
     const timeout = window.setTimeout(() => {
-      const result = saveStoredDocument(window.localStorage, document);
+      const result = saveStoredProject(
+        window.localStorage,
+        document,
+        workspaceState,
+      );
       if (result.ok) {
         setSaveState("saved");
-        setProject((currentProject) => {
-          const nextProject = createProjectSummary(document, currentProject);
-          setProjects((currentProjects) => {
-            const updatedProjects = upsertProject(
-              currentProjects,
-              nextProject,
-            );
-            saveProjects(window.localStorage, updatedProjects);
-            return updatedProjects;
-          });
-          window.localStorage.setItem(
-            CURRENT_PROJECT_STORAGE_KEY,
-            nextProject.id,
-          );
-          return nextProject;
-        });
         setHasExistingProject(true);
       } else if (result.reason === "unsafe-primary") {
-        const nextLoad = loadStoredDocument(window.localStorage);
+        const nextLoad = loadStoredProject(window.localStorage);
         setRecovery(nextLoad.recovery);
         setAutosaveAllowed(false);
         setSaveState("recovery");
@@ -575,7 +608,7 @@ export default function App() {
       }
     }, 300);
     return () => window.clearTimeout(timeout);
-  }, [autosaveAllowed, document, started]);
+  }, [autosaveAllowed, document, started, workspaceState]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -611,7 +644,7 @@ export default function App() {
 
     let result;
     try {
-      result = parseImportedDocument(await readFileText(file));
+      result = parseProjectFile(await readFileText(file));
     } catch {
       setFeedback("선택한 파일을 읽을 수 없습니다.");
       return;
@@ -631,15 +664,24 @@ export default function App() {
       }
       downloadText(
         `${exportBasename(document.site.name)}-before-import-${safeTimestamp()}.siteboard.json`,
-        jsonExport(document),
+        serializeProjectFile(document, workspaceState),
         "application/json",
       );
     }
 
-    const imported = withTimestamp(result.document);
-    const saved = saveStoredDocument(window.localStorage, imported, {
-      allowUnsafePrimaryReplacement: true,
-    });
+    const imported = withTimestamp(result.project.document);
+    const importedWorkspace: WorkspaceState = {
+      schemaVersion: 1,
+      binding: result.project.binding,
+      snapshots: result.project.snapshots,
+      lastDeployment: result.project.lastDeployment,
+    };
+    const saved = saveStoredProject(
+      window.localStorage,
+      imported,
+      importedWorkspace,
+      { allowUnsafePrimaryReplacement: true },
+    );
     if (!saved.ok) {
       setFeedback("가져온 내용을 브라우저에 저장하지 못했습니다.");
       setSaveState(saved.reason === "unsafe-primary" ? "recovery" : "error");
@@ -647,9 +689,8 @@ export default function App() {
     }
 
     dispatch({ type: "replace", document: imported });
-    const importedProject = createProjectSummary(imported);
-    storeProject(importedProject);
-    setPagesProject(importedProject.pagesProject);
+    setWorkspaceState(importedWorkspace);
+    setPagesProject(importedWorkspace.binding?.projectName ?? "");
     setDeploymentState({ history: [], deployments: [] });
     setStarted(true);
     setAutosaveAllowed(true);
@@ -658,9 +699,11 @@ export default function App() {
     setStep("content");
     setContentPanel("identity");
     setFeedback(
-      result.migratedFrom === 1
+      result.project.migratedFrom === 1
         ? "이전 버전의 내용을 새 형식으로 옮겼습니다. 공개 전에 내용과 연락처를 확인해 주세요."
-        : `${file.name} 내용을 열었습니다. 되돌리기 기록을 새로 시작합니다.`,
+        : result.project.legacy
+          ? `${file.name} 내용을 열었습니다. 기존 문서에는 배포 연결이 없어 Studio에서 대상을 새로 확인해야 합니다.`
+          : `${file.name} 작업을 열었습니다. 되돌리기 기록을 새로 시작합니다.`,
     );
   };
 
@@ -676,15 +719,25 @@ export default function App() {
     if (hasExistingProject) {
       downloadText(
         `${exportBasename(document.site.name)}-before-new-${safeTimestamp()}.siteboard.json`,
-        jsonExport(document),
+        serializeProjectFile(document, workspaceState),
         "application/json",
       );
     }
     const blank = createBlankDocument();
+    const nextWorkspace = emptyWorkspace();
+    const saved = saveStoredProject(
+      window.localStorage,
+      blank,
+      nextWorkspace,
+      { allowUnsafePrimaryReplacement: true },
+    );
+    if (!saved.ok) {
+      setFeedback("새 홈페이지를 브라우저에 저장하지 못했습니다.");
+      return;
+    }
     dispatch({ type: "replace", document: blank });
-    const nextProject = createProjectSummary(blank);
-    storeProject(nextProject);
-    setPagesProject(nextProject.pagesProject);
+    setWorkspaceState(nextWorkspace);
+    setPagesProject("");
     setDeploymentState({ history: [], deployments: [] });
     setStarted(true);
     setAutosaveAllowed(true);
@@ -698,7 +751,7 @@ export default function App() {
   const exportProjectFile = () => {
     downloadText(
       `${exportBasename(document.site.name)}.siteboard.json`,
-      jsonExport(document),
+      serializeProjectFile(document, workspaceState),
       "application/json",
     );
     setFeedback(
@@ -707,9 +760,12 @@ export default function App() {
   };
 
   const acceptRecovery = () => {
-    const saved = saveStoredDocument(window.localStorage, document, {
-      allowUnsafePrimaryReplacement: true,
-    });
+    const saved = saveStoredProject(
+      window.localStorage,
+      document,
+      workspaceState,
+      { allowUnsafePrimaryReplacement: true },
+    );
     if (!saved.ok) {
       setFeedback("복구한 내용을 브라우저에 저장하지 못했습니다.");
       return;
@@ -1597,21 +1653,136 @@ export default function App() {
     }
   };
 
-  const rememberDeployment = (record: DeploymentRecord) => {
-    const nextProject = projectWithDeployment(
-      {
-        ...project,
-        name: document.site.name.trim() || project.name,
-        pagesProject,
-        documentUpdatedAt: document.updatedAt,
-      },
-      record,
+  const draftPublicOrigin = normalizePublicOrigin(document.site.baseUrl);
+  const bindingReady = Boolean(
+    workspaceState.binding &&
+      workspaceState.binding.projectName === pagesProject.trim() &&
+      draftPublicOrigin !== null &&
+      workspaceState.binding.publicOrigin === draftPublicOrigin,
+  );
+
+  const rememberDeployment = (
+    record: DeploymentRecord,
+    options: {
+      binding?: CloudflareProjectBinding | null;
+      snapshots?: WorkspaceState["snapshots"];
+    } = {},
+  ) => {
+    storeWorkspace({
+      schemaVersion: 1,
+      binding:
+        options.binding === undefined
+          ? workspaceState.binding
+          : options.binding,
+      snapshots: options.snapshots ?? workspaceState.snapshots,
+      lastDeployment: record,
+    });
+  };
+
+  const bindCloudflareTarget = async () => {
+    const normalizedProject = pagesProject.trim();
+    if (!companion || companionState !== "available") {
+      setFeedback("로컬 Studio에서만 Cloudflare 배포 대상을 연결할 수 있습니다.");
+      return;
+    }
+    if (!companion.cloudflare.authenticated) {
+      setFeedback("터미널에서 wrangler login을 실행한 뒤 Studio를 다시 시작하세요.");
+      return;
+    }
+    if (!isValidProjectName(normalizedProject)) {
+      setFeedback(
+        "프로젝트 이름은 영문 소문자와 숫자, 가운데 하이픈으로 1~58자까지 입력하세요.",
+      );
+      return;
+    }
+    if (draftPublicOrigin === null) {
+      setFeedback("공개 주소는 경로가 없는 HTTPS 주소로 입력하세요.");
+      return;
+    }
+    setDeploymentAction("publishing");
+    setFeedback("Cloudflare 배포 대상을 확인하고 있습니다.");
+    try {
+      const target = await inspectCloudflareTarget(companion, {
+        projectName: normalizedProject,
+        publicOrigin: draftPublicOrigin,
+      });
+      if (
+        target.exists &&
+        !window.confirm(
+          `${target.projectName} 프로젝트의 현재 production과 도메인을 확인했습니다. 이 작업 파일을 해당 프로젝트에 연결할까요?`,
+        )
+      ) {
+        setFeedback("기존 Cloudflare 프로젝트를 연결하지 않았습니다.");
+        return;
+      }
+      const binding: CloudflareProjectBinding = {
+        provider: "cloudflare-pages",
+        accountId: target.accountId,
+        projectName: target.projectName,
+        projectId: target.projectId,
+        publicOrigin: target.publicOrigin,
+        existedWhenBound: target.exists,
+        boundAt: new Date().toISOString(),
+      };
+      storeWorkspace({
+        ...workspaceState,
+        binding,
+      });
+      setFeedback(
+        target.exists
+          ? `${target.projectName}의 현재 production을 배포 대상으로 연결했습니다.`
+          : `${target.projectName} 이름이 비어 있음을 확인했습니다. 첫 배포 때 새 프로젝트를 만듭니다.`,
+      );
+    } catch (error) {
+      setFeedback(
+        error instanceof Error
+          ? error.message
+          : "Cloudflare 배포 대상을 확인하지 못했습니다.",
+      );
+    } finally {
+      setDeploymentAction("idle");
+    }
+  };
+
+  const saveNamedSnapshot = () => {
+    const snapshot = createSnapshot(
+      document,
+      snapshotName || `저장본 ${workspaceState.snapshots.length + 1}`,
     );
-    storeProject(nextProject);
+    const snapshots = addSnapshot(workspaceState.snapshots, snapshot);
+    storeWorkspace({ ...workspaceState, snapshots });
+    setSnapshotName("");
+    setFeedback(`“${snapshot.name}” 편집 저장본을 만들었습니다.`);
+  };
+
+  const restoreDraftSnapshot = (snapshotId: string) => {
+    const snapshot = workspaceState.snapshots.find(
+      (candidate) => candidate.id === snapshotId,
+    );
+    if (
+      !snapshot ||
+      !window.confirm(
+        `“${snapshot.name}” 편집본을 현재 화면에 복원할까요? 공개 중인 production은 바뀌지 않습니다.`,
+      )
+    ) {
+      return;
+    }
+    const restored = withTimestamp(snapshot.document);
+    dispatch({ type: "replace", document: restored });
+    saveStoredProject(window.localStorage, restored, workspaceState, {
+      allowUnsafePrimaryReplacement: true,
+    });
+    setSaveState("saved");
+    setFeedback(
+      `“${snapshot.name}” 편집본을 복원했습니다. production은 변경하지 않았습니다.`,
+    );
   };
 
   const refreshDeploymentHistory = async () => {
-    if (!companion || !pagesProject.trim()) return;
+    if (!companion || !bindingReady || !workspaceState.binding) {
+      setFeedback("먼저 Cloudflare 배포 대상을 확인해 연결하세요.");
+      return;
+    }
     try {
       setDeploymentState(await loadDeploymentState(pagesProject.trim()));
       setFeedback("Cloudflare 배포 이력을 새로 확인했습니다.");
@@ -1637,34 +1808,67 @@ export default function App() {
       setFeedback(`배포 전에 ${errors.length}개 필수 항목을 확인해 주세요.`);
       return;
     }
+    if (!workspaceState.binding || !bindingReady) {
+      setFeedback("배포 전에 Cloudflare 대상을 확인해 연결하세요.");
+      return;
+    }
 
     const normalizedProject = pagesProject.trim();
-    const expectedUrl = `https://${normalizedProject}.pages.dev`;
-    const deploymentDocument = document.site.baseUrl.trim()
-      ? document
-      : withTimestamp({
-          ...document,
-          site: { ...document.site, baseUrl: expectedUrl },
-        });
+    const deploymentDocument = document;
+    const predeploySnapshot = createSnapshot(
+      document,
+      `배포 전 ${new Intl.DateTimeFormat("ko-KR", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(new Date())}`,
+    );
+    const nextSnapshots = addSnapshot(
+      workspaceState.snapshots,
+      predeploySnapshot,
+    );
+    storeWorkspace({ ...workspaceState, snapshots: nextSnapshots });
 
     setDeploymentAction("publishing");
     setFeedback("Cloudflare Pages에 새 리비전을 배포하고 있습니다.");
     try {
       const result = await publishWithCompanion(companion, {
-        projectName: normalizedProject,
+        binding: workspaceState.binding,
         documentName: deploymentDocument.site.name,
         publicUrl: deploymentDocument.site.baseUrl,
         archive: createDeploymentZip(deploymentDocument),
       });
-      if (!document.site.baseUrl.trim()) {
-        dispatch({ type: "commit", document: deploymentDocument });
+      const deployedOrigin =
+        normalizePublicOrigin(
+          result.target?.pagesOrigin ||
+            result.target?.currentUrl ||
+            result.deployment.productionUrl,
+        ) || "";
+      const nextOrigin =
+        draftPublicOrigin || deployedOrigin;
+      const nextBinding: CloudflareProjectBinding = {
+        ...workspaceState.binding,
+        projectId:
+          result.target?.projectId || workspaceState.binding.projectId,
+        publicOrigin: nextOrigin,
+        existedWhenBound: true,
+        boundAt: new Date().toISOString(),
+      };
+      if (!document.site.baseUrl.trim() && nextOrigin) {
+        const nextDocument = withTimestamp({
+          ...document,
+          site: { ...document.site, baseUrl: nextOrigin },
+        });
+        dispatch({ type: "commit", document: nextDocument });
         setSaveState("saving");
       }
       setDeploymentState({
         history: result.history,
         deployments: result.deployments,
       });
-      rememberDeployment(result.record);
+      rememberDeployment(result.record, {
+        binding: nextBinding,
+        snapshots: nextSnapshots,
+      });
       setFeedback(
         result.warning
           ? `배포는 완료됐습니다. ${result.warning} 배포 ID ${result.deployment.deploymentId}`
@@ -1687,7 +1891,10 @@ export default function App() {
   };
 
   const rollbackDeployment = async (deploymentId: string) => {
-    if (!companion) return;
+    if (!companion || !workspaceState.binding || !bindingReady) {
+      setFeedback("복구 전에 Cloudflare 배포 대상을 다시 확인하세요.");
+      return;
+    }
     if (
       !window.confirm(
         "선택한 정상 production 배포로 즉시 되돌릴까요? 현재 배포는 이력에 그대로 남습니다.",
@@ -1699,11 +1906,11 @@ export default function App() {
     setFeedback("선택한 production 배포로 복구하고 있습니다.");
     try {
       const result = await rollbackWithCompanion(companion, {
-        projectName: pagesProject.trim(),
+        binding: workspaceState.binding,
         deploymentId,
         publicUrl:
-          document.site.baseUrl.trim() ||
-          `https://${pagesProject.trim()}.pages.dev`,
+          workspaceState.binding.publicOrigin ||
+          document.site.baseUrl.trim(),
       });
       setDeploymentState({
         history: result.history,
@@ -1800,6 +2007,7 @@ export default function App() {
         ) : null}
       </section>
 
+      {companionState === "available" ? (
       <section className="editor-card deployment-card">
         <header>
           <p>Cloudflare Pages</p>
@@ -1813,9 +2021,6 @@ export default function App() {
             value={pagesProject}
             spellCheck={false}
             onChange={(event) => setPagesProject(event.target.value)}
-            onBlur={() =>
-              storeProject({ ...project, pagesProject: pagesProject.trim() })
-            }
           />
         </Field>
 
@@ -1826,41 +2031,47 @@ export default function App() {
           <span aria-hidden="true" />
           <div>
             <strong>
-              {companionState === "checking"
-                ? "Studio 연결 확인 중"
-                : companionState === "available"
-                  ? companion?.cloudflare.authenticated
-                    ? "로컬 Studio와 Cloudflare 연결됨"
-                    : "Studio 연결됨 · Cloudflare 로그인 필요"
-                  : "브라우저 편집 모드"}
+              {companion?.cloudflare.authenticated
+                ? "로컬 Studio와 Cloudflare 연결됨"
+                : "Studio 연결됨 · Cloudflare 로그인 필요"}
             </strong>
             <p>
-              {companionState === "available"
-                ? companion?.cloudflare.authenticated
-                  ? companion.cloudflare.selectedAccountId
-                    ? "토큰은 브라우저로 전달하거나 저장하지 않습니다."
-                    : "계정이 여러 개면 CLOUDFLARE_ACCOUNT_ID를 지정하고 Studio를 다시 실행하세요."
-                  : "터미널에서 wrangler login을 실행하고 Studio를 다시 시작하세요."
-                : "실제 배포와 복구는 로컬 Studio companion이 맡습니다."}
+              {companion?.cloudflare.authenticated
+                ? companion.cloudflare.selectedAccountId
+                  ? "토큰은 브라우저로 전달하거나 저장하지 않습니다."
+                  : "계정이 여러 개면 CLOUDFLARE_ACCOUNT_ID를 지정하고 Studio를 다시 실행하세요."
+                : "터미널에서 wrangler login을 실행하고 Studio를 다시 시작하세요."}
             </p>
           </div>
         </div>
 
-        {companionState === "unavailable" ? (
-          <div className="studio-guide">
-            <strong>Studio에서 열기</strong>
-            <ol>
-              <li>GitHub v3.0.0 릴리스의 npm 패키지를 전역 설치합니다.</li>
-              <li>npx wrangler login으로 Cloudflare에 로그인합니다.</li>
-              <li>siteboard studio를 실행해 열린 화면에서 배포합니다.</li>
-            </ol>
-            <a href={STUDIO_RELEASE_URL} target="_blank" rel="noreferrer">
-              v3.0.0 설치 파일과 명령 보기 ↗
-            </a>
-          </div>
-        ) : null}
+        <div className="binding-summary" role="status">
+          <strong>
+            {bindingReady && workspaceState.binding
+              ? `${workspaceState.binding.projectName} 연결됨`
+              : "배포 대상 확인 필요"}
+          </strong>
+          <p>
+            {bindingReady && workspaceState.binding
+              ? workspaceState.binding.publicOrigin ||
+                "첫 배포에서 pages.dev 주소를 확정합니다."
+              : "기존 프로젝트를 자동 재사용하지 않습니다. 대상을 확인해 명시적으로 연결하세요."}
+          </p>
+        </div>
 
         <div className="deployment-actions">
+          <button
+            type="button"
+            disabled={
+              deploymentAction !== "idle" ||
+              !companion?.cloudflare.authenticated ||
+              !isValidProjectName(pagesProject.trim()) ||
+              draftPublicOrigin === null
+            }
+            onClick={bindCloudflareTarget}
+          >
+            대상 확인 및 연결
+          </button>
           <button
             className="publish-button"
             type="button"
@@ -1869,7 +2080,8 @@ export default function App() {
               deploymentAction !== "idle" ||
               companionState !== "available" ||
               !companion?.cloudflare.authenticated ||
-              !companion.cloudflare.selectedAccountId
+              !companion.cloudflare.selectedAccountId ||
+              !bindingReady
             }
             onClick={publishWebsite}
           >
@@ -1900,8 +2112,79 @@ export default function App() {
           현재 컴퓨터의 로컬 Studio에서 관리합니다.
         </p>
       </section>
+      ) : (
+        <section className="editor-card deployment-card">
+          <header>
+            <p>Studio에서 배포</p>
+            <h3>작업 파일을 저장하고 로컬 Studio에서 엽니다.</h3>
+          </header>
+          <ol className="studio-steps">
+            <li>현재 작업 파일을 저장합니다.</li>
+            <li>Siteboard Studio를 설치하고 작업 파일과 함께 실행합니다.</li>
+            <li>Studio에서 Cloudflare 대상을 확인한 뒤 배포합니다.</li>
+          </ol>
+          <div className="deployment-actions">
+            <button className="publish-button" type="button" onClick={exportProjectFile}>
+              Studio용 작업 파일 저장
+            </button>
+            <a href={STUDIO_RELEASE_URL} target="_blank" rel="noreferrer">
+              최신 Studio 설치 안내 ↗
+            </a>
+            <button type="button" disabled={errors.length > 0} onClick={exportZip}>
+              ZIP 내보내기
+            </button>
+          </div>
+        </section>
+      )}
 
-      {deploymentState.deployments.length ? (
+      <section className="editor-card snapshot-card">
+        <header>
+          <p>편집 저장본</p>
+          <h3>현재 초안을 저장하거나 이전 초안으로 돌아갑니다.</h3>
+        </header>
+        <div className="snapshot-create">
+          <input
+            aria-label="편집 저장본 이름"
+            value={snapshotName}
+            maxLength={80}
+            placeholder="예: 가격표 수정 전"
+            onChange={(event) => setSnapshotName(event.target.value)}
+          />
+          <button type="button" onClick={saveNamedSnapshot}>
+            현재 초안 저장
+          </button>
+        </div>
+        {workspaceState.snapshots.length ? (
+          <ol className="snapshot-list">
+            {[...workspaceState.snapshots].reverse().map((snapshot) => (
+              <li key={snapshot.id}>
+                <div>
+                  <strong>{snapshot.name}</strong>
+                  <small>
+                    {new Intl.DateTimeFormat("ko-KR", {
+                      dateStyle: "medium",
+                      timeStyle: "short",
+                    }).format(new Date(snapshot.createdAt))}
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => restoreDraftSnapshot(snapshot.id)}
+                >
+                  편집본 복원
+                </button>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="package-note">아직 만든 편집 저장본이 없습니다.</p>
+        )}
+        <p className="package-note">
+          편집본 복원은 현재 초안만 바꾸며 공개 중인 production은 변경하지 않습니다.
+        </p>
+      </section>
+
+      {companionState === "available" && deploymentState.deployments.length ? (
         <section className="editor-card deployment-history-card">
           <header>
             <p>Production 배포</p>
@@ -1939,7 +2222,7 @@ export default function App() {
         </section>
       ) : null}
 
-      {deploymentState.history.length ? (
+      {companionState === "available" && deploymentState.history.length ? (
         <section className="editor-card deployment-history-card">
           <header>
             <p>로컬 운영 이력</p>
@@ -1984,11 +2267,13 @@ export default function App() {
   const openDashboard = () => {
     if (!started) return;
     if (started && autosaveAllowed) {
-      const saved = saveStoredDocument(window.localStorage, document);
+      const saved = saveStoredProject(
+        window.localStorage,
+        document,
+        workspaceState,
+      );
       setSaveState(saved.ok ? "saved" : "error");
     }
-    const nextProject = createProjectSummary(document, project);
-    storeProject(nextProject);
     setStarted(false);
   };
 
@@ -2110,7 +2395,8 @@ export default function App() {
 
       {!started ? (
         <ProjectDashboard
-          project={project}
+          document={document}
+          workspace={workspaceState}
           hasExistingProject={hasExistingProject}
           companionState={companionState}
           companion={companion}

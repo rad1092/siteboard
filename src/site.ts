@@ -419,10 +419,18 @@ export function isSafeHref(value: string): boolean {
   }
 }
 
-function isAbsoluteWebUrl(value: string): boolean {
+function isRootHttpsOrigin(value: string): boolean {
   try {
     const url = new URL(value);
-    return ["http:", "https:"].includes(url.protocol);
+    return (
+      url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      (url.pathname === "/" || url.pathname === "") &&
+      !url.search &&
+      !url.hash
+    );
   } catch {
     return false;
   }
@@ -471,21 +479,12 @@ export function validateDocument(document: SiteDocument): ValidationIssue[] {
         "identity",
       ),
     );
-  } else if (!isAbsoluteWebUrl(baseUrl)) {
+  } else if (!isRootHttpsOrigin(baseUrl)) {
     issues.push(
       issue(
         "error",
         "site-url-invalid",
-        "공개 주소를 http:// 또는 https://부터 다시 확인하세요.",
-        "identity",
-      ),
-    );
-  } else if (!baseUrl.startsWith("https://")) {
-    issues.push(
-      issue(
-        "warning",
-        "site-url-https",
-        "HTTPS 주소를 사용하면 방문자와 검색 서비스가 안전하게 접속합니다.",
+        "공개 주소는 경로가 없는 HTTPS 주소로 입력하세요.",
         "identity",
       ),
     );
@@ -1015,7 +1014,7 @@ export function generateStaticHtml(
   const paths = options.preview
     ? previewAssetPaths(document)
     : exportAssetPaths(document);
-  const baseUrl = isAbsoluteWebUrl(document.site.baseUrl.trim())
+  const baseUrl = isRootHttpsOrigin(document.site.baseUrl.trim())
     ? normalizedBaseUrl(document.site.baseUrl)
     : "";
   const seoTitle = document.seo.title.trim() || document.site.name.trim();
@@ -1249,7 +1248,7 @@ function xmlEscape(value: string): string {
 
 export function buildExportFiles(document: SiteDocument): ExportFile[] {
   const paths = exportAssetPaths(document);
-  const baseUrl = isAbsoluteWebUrl(document.site.baseUrl.trim())
+  const baseUrl = isRootHttpsOrigin(document.site.baseUrl.trim())
     ? normalizedBaseUrl(document.site.baseUrl)
     : "";
   const files: ExportFile[] = [

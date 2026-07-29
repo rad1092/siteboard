@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { access } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { access, readFile, stat } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CloudflarePagesService } from "./cloudflare.js";
 import { DeploymentHistoryStore } from "./history-store.js";
@@ -10,6 +10,9 @@ import { createStudioServer } from "./server.js";
 import { StudioOperations } from "./studio-operations.js";
 
 const packageDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const packageMetadata = JSON.parse(
+  await readFile(resolve(packageDirectory, "package.json"), "utf8"),
+);
 
 function parsePort(args) {
   const index = args.indexOf("--port");
@@ -48,12 +51,43 @@ function usage() {
       "Siteboard",
       "",
       "사용법:",
-      "  siteboard studio [--port 47831] [--no-open]",
+      "  siteboard studio [작업파일.siteboard.json] [--port 47831] [--no-open]",
+      "  siteboard status",
+      "  siteboard --version",
       "",
       "Cloudflare 인증은 CLOUDFLARE_API_TOKEN 또는 wrangler login을 사용합니다.",
       "",
     ].join("\n"),
   );
+}
+
+async function startupProject(args) {
+  const positional = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === "--port") {
+      index += 1;
+      continue;
+    }
+    if (value === "--no-open") continue;
+    if (value.startsWith("-")) {
+      throw new Error(`지원하지 않는 옵션입니다: ${value}`);
+    }
+    positional.push(value);
+  }
+  if (positional.length > 1) {
+    throw new Error("한 번에 하나의 Siteboard 작업 파일만 열 수 있습니다.");
+  }
+  if (!positional.length) return null;
+  const path = resolve(positional[0]);
+  const file = await stat(path);
+  if (!file.isFile() || file.size > 20 * 1024 * 1024) {
+    throw new Error("20MB 이하의 Siteboard 작업 파일을 선택하세요.");
+  }
+  return {
+    fileName: basename(path),
+    content: await readFile(path, "utf8"),
+  };
 }
 
 async function studio(args) {
@@ -70,7 +104,11 @@ async function studio(args) {
     cloudflare: new CloudflarePagesService(),
     history: new DeploymentHistoryStore(),
   });
-  const studioServer = createStudioServer({ staticDirectory, operations });
+  const studioServer = createStudioServer({
+    staticDirectory,
+    operations,
+    startupProject: await startupProject(args),
+  });
   const address = await studioServer.listen(parsePort(args));
   const url = `${address.origin}/`;
 
@@ -95,10 +133,30 @@ async function studio(args) {
   process.on("SIGTERM", shutdown);
 }
 
+async function status() {
+  const cloudflare = await new CloudflarePagesService().authStatus();
+  process.stdout.write(
+    [
+      `Siteboard ${packageMetadata.version}`,
+      `Cloudflare 로그인: ${cloudflare.authenticated ? "확인됨" : "필요"}`,
+      `계정 선택: ${cloudflare.selectedAccountId ? "완료" : "미완료"}`,
+      "",
+    ].join("\n"),
+  );
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (!command || command === "--help" || command === "-h") {
     usage();
+    return;
+  }
+  if (command === "--version" || command === "-v") {
+    process.stdout.write(`${packageMetadata.version}\n`);
+    return;
+  }
+  if (command === "status") {
+    await status();
     return;
   }
   if (command !== "studio") {

@@ -35,14 +35,20 @@ function mockDownloads() {
 }
 
 describe("Siteboard 제작 흐름", () => {
-  it("빈 브라우저에서는 새 홈페이지와 작업 파일 열기로 시작한다", () => {
+  it("빈 브라우저에서는 새 홈페이지와 작업 파일 열기로 시작한다", async () => {
     render(<App />);
 
     expect(
       screen.getByRole("heading", {
-        name: "사업 홈페이지를 한 장으로 완성하세요.",
+        name: "홈페이지 운영",
       }),
     ).toBeVisible();
+    expect(
+      await screen.findByRole("link", { name: "Studio 설치 ↗" }),
+    ).toHaveAttribute(
+      "href",
+      "https://github.com/rad1092/siteboard/releases/tag/v3.0.0",
+    );
     expect(
       screen.getByRole("button", { name: "새 홈페이지 만들기" }),
     ).toBeVisible();
@@ -146,10 +152,10 @@ describe("Siteboard 제작 흐름", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "새 홈페이지 만들기" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "출시 준비" }));
+    fireEvent.click(screen.getByRole("button", { name: "배포 관리" }));
 
     expect(
-      screen.getByRole("button", { name: "홈페이지 파일 받기" }),
+      screen.getByRole("button", { name: "ZIP 내보내기" }),
     ).toBeDisabled();
     expect(screen.getByText("상호나 이름을 입력하세요.")).toBeVisible();
     expect(
@@ -167,9 +173,10 @@ describe("Siteboard 제작 흐름", () => {
     );
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "출시 준비" }));
+    fireEvent.click(screen.getByRole("button", { name: "계속 편집" }));
+    fireEvent.click(screen.getByRole("button", { name: "배포 관리" }));
     const download = screen.getByRole("button", {
-      name: "홈페이지 파일 받기",
+      name: "ZIP 내보내기",
     });
 
     expect(download).toBeEnabled();
@@ -178,6 +185,27 @@ describe("Siteboard 제작 흐름", () => {
     const blob = downloads.createObjectUrl.mock.calls[0][0] as Blob;
     expect(blob.type).toBe("application/zip");
     expect(screen.getByText(/홈페이지 파일을 저장했습니다/)).toBeVisible();
+  });
+
+  it("공개 편집기의 작업 파일을 로컬 Studio로 넘길 수 있다", () => {
+    const downloads = mockDownloads();
+    localStorage.setItem(
+      DOCUMENT_STORAGE_KEY,
+      JSON.stringify(completeDocument()),
+    );
+
+    render(<App />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Studio용 작업 파일 저장" }),
+    );
+
+    expect(downloads.click).toHaveBeenCalledOnce();
+    expect(
+      screen.getByText(
+        "작업 파일을 저장했습니다. 로컬 Studio에서 ‘작업 파일 열기’로 불러오세요.",
+      ),
+    ).toBeVisible();
+    expect(downloads.createObjectUrl.mock.calls[0][0]).toBeInstanceOf(Blob);
   });
 
   it("사업 정보와 연락처만으로 이미지와 공개 주소 없이 ZIP을 만든다", () => {
@@ -201,9 +229,9 @@ describe("Siteboard 제작 흐름", () => {
       target: { value: "hello@plant.example" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "출시 준비" }));
+    fireEvent.click(screen.getByRole("button", { name: "배포 관리" }));
     const download = screen.getByRole("button", {
-      name: "홈페이지 파일 받기",
+      name: "ZIP 내보내기",
     });
     expect(download).toBeEnabled();
     expect(
@@ -232,6 +260,7 @@ describe("Siteboard 제작 흐름", () => {
       JSON.stringify(completeDocument()),
     );
     render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "계속 편집" }));
 
     fireEvent.click(screen.getByRole("button", { name: /구성$/ }));
     const aboutToggle = screen.getByRole("checkbox", { name: "소개" });
@@ -263,6 +292,7 @@ describe("Siteboard 제작 흐름", () => {
         JSON.stringify(completeDocument()),
       );
       render(<App />);
+      fireEvent.click(screen.getByRole("button", { name: "계속 편집" }));
 
       fireEvent.click(screen.getByRole("button", { name: /구성$/ }));
       const toggle = screen.getByRole("checkbox", { name: toggleName });
@@ -360,7 +390,7 @@ describe("Siteboard 제작 흐름", () => {
       target: { value: "hello@plant.example" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "출시 준비" }));
+    fireEvent.click(screen.getByRole("button", { name: "배포 관리" }));
     fireEvent.change(screen.getByLabelText(/^검색 결과 제목/), {
       target: { value: "동그라미 식물점 | 망원동 식물 상담" },
     });
@@ -370,11 +400,11 @@ describe("Siteboard 제작 흐름", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "홈페이지 파일 받기" }),
+        screen.getByRole("button", { name: "ZIP 내보내기" }),
       ).toBeEnabled(),
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "홈페이지 파일 받기" }),
+      screen.getByRole("button", { name: "ZIP 내보내기" }),
     );
     expect(downloads.click).toHaveBeenCalledOnce();
     expect(screen.getByText(/홈페이지 파일을 저장했습니다/)).toBeVisible();
@@ -389,9 +419,6 @@ describe("Siteboard 제작 흐름", () => {
     localStorage.setItem(DOCUMENT_STORAGE_KEY, JSON.stringify(current));
 
     render(<App />);
-    fireEvent.change(screen.getByLabelText("상호 또는 이름"), {
-      target: { value: "백업할 이름" },
-    });
     fireEvent.change(screen.getByLabelText("Siteboard 작업 파일 선택"), {
       target: {
         files: [

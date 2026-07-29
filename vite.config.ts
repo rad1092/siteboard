@@ -42,7 +42,6 @@ function stampServiceWorker(): Plugin {
 }
 
 export default defineConfig({
-  base: "/siteboard/",
   plugins: [react(), stampServiceWorker()],
   test: {
     environment: "jsdom",

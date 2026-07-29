@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 const projectRoot = process.cwd();
 
 describe("deployment contract", () => {
-  it("uses /siteboard/ for Vite, the manifest, icons, and service worker", async () => {
+  it("uses the independent siteboard.whago.net root for Vite and the PWA", async () => {
     const [viteConfig, indexHtml, mainSource, manifestText, serviceWorker] =
       await Promise.all([
         readFile(resolve(projectRoot, "vite.config.ts"), "utf8"),
@@ -15,20 +15,28 @@ describe("deployment contract", () => {
         readFile(resolve(projectRoot, "public/sw.js"), "utf8"),
       ]);
     const manifest = JSON.parse(manifestText) as {
+      id: string;
       start_url: string;
       scope: string;
       lang: string;
       icons: Array<{ src: string }>;
     };
 
-    expect(viteConfig).toContain('base: "/siteboard/"');
-    expect(indexHtml).toContain('href="/siteboard/manifest.webmanifest"');
-    expect(manifest.start_url).toBe("/siteboard/");
-    expect(manifest.scope).toBe("/siteboard/");
+    expect(viteConfig).not.toContain('base: "/siteboard/"');
+    expect(indexHtml).toContain('href="/manifest.webmanifest"');
+    expect(indexHtml).toContain(
+      '<link rel="canonical" href="https://siteboard.whago.net/"',
+    );
+    expect(indexHtml).not.toContain("rad1092.github.io");
+    expect(manifest.id).toBe("/");
+    expect(manifest.start_url).toBe("/");
+    expect(manifest.scope).toBe("/");
     expect(manifest.lang).toBe("ko");
     expect(indexHtml).toContain('<html lang="ko">');
-    expect(manifest.icons.every((icon) => icon.src.startsWith("/siteboard/")))
-      .toBe(true);
+    expect(manifest.icons.every((icon) => icon.src.startsWith("/"))).toBe(true);
+    expect(
+      manifest.icons.every((icon) => !icon.src.startsWith("/siteboard/")),
+    ).toBe(true);
     expect(mainSource).toContain("scope: import.meta.env.BASE_URL");
     expect(serviceWorker).toContain(
       'const CACHE_PREFIX = "siteboard-shell-"',
@@ -37,7 +45,7 @@ describe("deployment contract", () => {
       'const RELEASE_ID = "__SITEBOARD_RELEASE__"',
     );
     expect(serviceWorker).toContain("key.startsWith(CACHE_PREFIX)");
-    expect(serviceWorker).toContain("isInSiteboardScope(requestUrl)");
+    expect(serviceWorker).toContain("isInAppScope(requestUrl)");
     expect(viteConfig).toContain(
       'worker.replaceAll("__SITEBOARD_RELEASE__", releaseId)',
     );
@@ -49,17 +57,36 @@ describe("deployment contract", () => {
     ]);
   });
 
-  it("ships a Pages workflow that gates deployment on test, lint, and build", async () => {
-    const workflow = await readFile(
-      resolve(projectRoot, ".github/workflows/deploy-pages.yml"),
-      "utf8",
-    );
+  it("ships a local Studio CLI and no GitHub Pages deployment workflow", async () => {
+    const [packageText, cli, server, ci] = await Promise.all([
+      readFile(resolve(projectRoot, "package.json"), "utf8"),
+      readFile(resolve(projectRoot, "cli/siteboard.js"), "utf8"),
+      readFile(resolve(projectRoot, "cli/server.js"), "utf8"),
+      readFile(resolve(projectRoot, ".github/workflows/ci.yml"), "utf8"),
+    ]);
+    const packageJson = JSON.parse(packageText) as {
+      bin: Record<string, string>;
+      files: string[];
+      scripts: Record<string, string>;
+      dependencies: Record<string, string>;
+    };
 
-    expect(workflow).toContain("npm test");
-    expect(workflow).toContain("npm run lint");
-    expect(workflow).toContain("npm run build");
-    expect(workflow).toMatch(
-      /actions\/deploy-pages@[a-f0-9]{40}\s+# v4/,
+    expect(packageJson.bin.siteboard).toBe("./cli/siteboard.js");
+    expect(packageJson.scripts.studio).toContain("siteboard.js studio");
+    expect(packageJson.scripts.prepare).toBe("npm run build");
+    expect(packageJson.files).toContain("dist");
+    expect(packageJson.files).toContain("cli/siteboard.js");
+    expect(packageJson.files.every((file) => !file.endsWith(".test.js"))).toBe(
+      true,
     );
+    expect(packageJson.dependencies.wrangler).toMatch(/^\^4\./);
+    expect(cli).toContain("createStudioServer");
+    expect(server).toContain('server.listen(port, "127.0.0.1"');
+    expect(ci).toContain("npm test");
+    expect(ci).toContain("npm run lint");
+    expect(ci).toContain("npm run build");
+    await expect(
+      access(resolve(projectRoot, ".github/workflows/deploy-pages.yml")),
+    ).rejects.toThrow();
   });
 });

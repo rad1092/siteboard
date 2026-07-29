@@ -1266,13 +1266,12 @@ export function buildExportFiles(document: SiteDocument): ExportFile[] {
         `${document.site.name || "홈페이지"} 배포 안내\n\n` +
         `압축을 푼 뒤 이 폴더의 전체 내용을 함께 업로드하세요.\n\n` +
         `Cloudflare Pages\n` +
-        `1. 새 Pages 프로젝트에서 직접 업로드를 선택합니다.\n` +
-        `2. 압축을 푼 전체 파일을 올립니다.\n` +
-        `3. 연결한 도메인에서 화면과 연락 링크를 확인합니다.\n\n` +
-        `GitHub Pages\n` +
-        `1. 저장소 루트에 전체 파일을 올립니다.\n` +
-        `2. 저장소 설정의 Pages에서 배포할 브랜치를 선택합니다.\n` +
-        `3. 공개 주소가 정해지면 Siteboard의 홈페이지 주소와 검색 정보를 갱신해 다시 받습니다.\n`,
+        `1. Siteboard Studio에서 프로젝트 이름을 입력하고 배포합니다.\n` +
+        `2. 또는 Pages의 Direct Upload에서 압축을 푼 전체 파일을 올립니다.\n` +
+        `3. 공개 주소에서 화면과 연락 링크를 확인합니다.\n\n` +
+        `다른 정적 호스팅\n` +
+        `이 폴더의 전체 내용을 문서 루트에 함께 업로드하세요.\n` +
+        `공개 주소가 바뀌면 Siteboard의 홈페이지 주소와 검색 정보를 갱신해 다시 내보냅니다.\n`,
     },
   ];
 

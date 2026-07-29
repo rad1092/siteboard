@@ -9,6 +9,15 @@ import {
 } from "react";
 import { createDeploymentZip } from "./archive";
 import {
+  detectCompanion,
+  loadDeploymentState,
+  publishWithCompanion,
+  rollbackWithCompanion,
+  type CompanionStatus,
+  type DeploymentRecord,
+  type DeploymentState,
+} from "./deployment";
+import {
   blockLabels,
   createBlankDocument,
   createFaq,
@@ -16,6 +25,15 @@ import {
   createWork,
 } from "./data";
 import { createHistory, historyReducer } from "./history";
+import {
+  CURRENT_PROJECT_STORAGE_KEY,
+  createProjectSummary,
+  loadProjects,
+  projectWithDeployment,
+  saveProjects,
+  upsertProject,
+  type SiteProjectSummary,
+} from "./projects";
 import {
   generateStaticHtml,
   imageAssetFromDataUrl,
@@ -47,12 +65,17 @@ type ContentPanel =
   | "contact";
 type PreviewDevice = "desktop" | "mobile";
 type SaveState = "saved" | "saving" | "error" | "recovery";
+type CompanionState = "checking" | "available" | "unavailable";
+type DeploymentActionState = "idle" | "publishing" | "rolling-back";
+
+const STUDIO_RELEASE_URL =
+  "https://github.com/rad1092/siteboard/releases/tag/v3.0.0";
 
 const steps: Array<[EditorStep, string, string]> = [
   ["content", "1", "내용"],
   ["structure", "2", "구성"],
   ["style", "3", "스타일"],
-  ["launch", "4", "출시"],
+  ["launch", "4", "배포"],
 ];
 
 const contentPanels: Array<[ContentPanel, string]> = [
@@ -219,49 +242,156 @@ function ImageUploader({
   );
 }
 
-function StartScreen({
+function deploymentStatusLabel(record: DeploymentRecord | null): string {
+  if (!record) return "아직 배포하지 않음";
+  if (record.status === "live") return "운영 중";
+  if (record.status === "deployed-history-error") {
+    return "배포됨 · 로컬 이력 확인 필요";
+  }
+  if (record.status === "recovered") return "이전 버전으로 복구됨";
+  if (record.status === "recovered-history-error") {
+    return "복구됨 · 로컬 이력 확인 필요";
+  }
+  if (record.status === "verification-failed") return "배포됨 · 응답 확인 필요";
+  if (record.status === "recovery-failed") return "복구됨 · 응답 확인 필요";
+  if (record.status === "rollback-failed") return "복구 실패";
+  return "배포 실패";
+}
+
+function ProjectDashboard({
+  project,
+  hasExistingProject,
+  companionState,
+  companion,
+  onContinue,
   onCreate,
   onOpen,
+  onExport,
 }: {
+  project: SiteProjectSummary;
+  hasExistingProject: boolean;
+  companionState: CompanionState;
+  companion: CompanionStatus | null;
+  onContinue: () => void;
   onCreate: () => void;
   onOpen: () => void;
+  onExport: () => void;
 }) {
+  const lastDeployment = project.lastDeployment;
   return (
-    <main className="start-screen">
-      <div className="start-mark" aria-hidden="true">
-        S
-      </div>
-      <p className="start-kicker">SITEBOARD</p>
-      <h1>사업 홈페이지를 한 장으로 완성하세요.</h1>
-      <p>
-        상호와 소개, 연락처부터 입력해 먼저 공개할 수 있습니다. 서비스와
-        작업 이미지 같은 내용은 필요할 때 추가하세요.
-      </p>
-      <div className="start-actions">
-        <button className="primary-button" type="button" onClick={onCreate}>
-          새 홈페이지 만들기
-        </button>
-        <button type="button" onClick={onOpen}>
-          작업 파일 열기
-        </button>
-      </div>
-      <ol>
-        <li>
-          <span>1</span>
-          <strong>내용 입력</strong>
-          <small>사업 정보와 연락처부터 채웁니다.</small>
-        </li>
-        <li>
-          <span>2</span>
-          <strong>화면 확인</strong>
-          <small>컴퓨터와 휴대전화 크기를 확인합니다.</small>
-        </li>
-        <li>
-          <span>3</span>
-          <strong>파일 받기</strong>
-          <small>홈페이지와 이미지를 한 묶음으로 저장합니다.</small>
-        </li>
-      </ol>
+    <main className="start-screen" id="dashboard">
+      <header className="dashboard-heading">
+        <p className="start-kicker">SITEBOARD / OPERATIONS</p>
+        <h1>홈페이지 운영</h1>
+        <p>최근 작업을 열고, 편집부터 실제 배포와 복구까지 이어갑니다.</p>
+      </header>
+
+      <section className="recent-projects" aria-labelledby="recent-title">
+        <div className="dashboard-section-heading">
+          <div>
+            <p>최근 프로젝트</p>
+            <h2 id="recent-title">
+              {hasExistingProject ? "이어서 관리할 홈페이지" : "첫 홈페이지 만들기"}
+            </h2>
+          </div>
+          <div className="start-actions">
+            <button className="primary-button" type="button" onClick={onCreate}>
+              새 홈페이지 만들기
+            </button>
+            <button type="button" onClick={onOpen}>
+              작업 파일 열기
+            </button>
+            {hasExistingProject ? (
+              <button type="button" onClick={onExport}>
+                Studio용 작업 파일 저장
+              </button>
+            ) : null}
+          </div>
+        </div>
+        {hasExistingProject ? (
+          <article className="project-row">
+            <div>
+              <span
+                className={`deployment-dot deployment-dot--${lastDeployment?.status ?? "empty"}`}
+                aria-hidden="true"
+              />
+              <div>
+                <strong>{project.name}</strong>
+                <p>{project.pagesProject}.pages.dev</p>
+              </div>
+            </div>
+            <dl>
+              <div>
+                <dt>상태</dt>
+                <dd>{deploymentStatusLabel(lastDeployment)}</dd>
+              </div>
+              <div>
+                <dt>최근 수정</dt>
+                <dd>
+                  {new Intl.DateTimeFormat("ko-KR", {
+                    dateStyle: "medium",
+                  }).format(new Date(project.documentUpdatedAt))}
+                </dd>
+              </div>
+              <div>
+                <dt>리비전</dt>
+                <dd>{lastDeployment?.revision?.slice(0, 12) || "—"}</dd>
+              </div>
+            </dl>
+            <div className="project-row-actions">
+              {lastDeployment?.productionUrl ? (
+                <a
+                  href={lastDeployment.productionUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  운영 사이트 ↗
+                </a>
+              ) : null}
+              <button className="primary-button" type="button" onClick={onContinue}>
+                계속 편집
+              </button>
+            </div>
+          </article>
+        ) : (
+          <div className="empty-project">
+            <strong>저장된 프로젝트가 없습니다.</strong>
+            <p>내용을 만든 뒤 ZIP으로 보관하거나 Studio에서 바로 배포할 수 있습니다.</p>
+          </div>
+        )}
+      </section>
+
+      <section className="companion-summary" aria-labelledby="companion-title">
+        <div>
+          <p>로컬 배포 연결</p>
+          <h2 id="companion-title">
+            {companionState === "checking"
+              ? "Studio 확인 중"
+              : companionState === "available"
+                ? "Studio 연결됨"
+                : "브라우저 편집 모드"}
+          </h2>
+        </div>
+        <p>
+          {companionState === "available"
+            ? companion?.cloudflare.authenticated
+              ? "Cloudflare 인증을 확인했습니다. 편집 화면에서 배포와 복구를 실행할 수 있습니다."
+              : "Studio는 연결됐지만 Cloudflare 로그인이 필요합니다."
+            : hasExistingProject
+              ? "작업 파일을 저장한 뒤 로컬 Studio의 ‘작업 파일 열기’로 이어서 배포할 수 있습니다."
+              : "배포와 복구는 컴퓨터에서 siteboard studio를 실행한 뒤 사용할 수 있습니다. ZIP 내보내기는 그대로 제공됩니다."}
+        </p>
+        {companionState === "unavailable" ? (
+          <a
+            className="studio-install-link"
+            href={STUDIO_RELEASE_URL}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Studio 설치 ↗
+          </a>
+        ) : null}
+      </section>
     </main>
   );
 }
@@ -317,8 +447,22 @@ export default function App() {
     createHistory,
   );
   const document = history.present;
+  const [projects, setProjects] = useState(() =>
+    loadProjects(window.localStorage),
+  );
+  const [project, setProject] = useState<SiteProjectSummary>(() => {
+    const currentId = window.localStorage.getItem(
+      CURRENT_PROJECT_STORAGE_KEY,
+    );
+    const previous =
+      projects.find((candidate) => candidate.id === currentId) ?? projects[0];
+    return createProjectSummary(initialStorage.document, previous);
+  });
+  const [hasExistingProject, setHasExistingProject] = useState(
+    initialStorage.source !== "starter",
+  );
   const [started, setStarted] = useState(
-    initialStorage.source !== "starter" || Boolean(initialStorage.recovery),
+    Boolean(initialStorage.recovery),
   );
   const [step, setStep] = useState<EditorStep>("content");
   const [contentPanel, setContentPanel] =
@@ -342,6 +486,16 @@ export default function App() {
       ? "기존 Siteboard 파일을 새 홈페이지 형식으로 옮겼습니다. 공개 전에 내용과 연락처를 확인해 주세요."
       : "",
   );
+  const [companionState, setCompanionState] =
+    useState<CompanionState>("checking");
+  const [companion, setCompanion] = useState<CompanionStatus | null>(null);
+  const [deploymentState, setDeploymentState] = useState<DeploymentState>({
+    history: [],
+    deployments: [],
+  });
+  const [deploymentAction, setDeploymentAction] =
+    useState<DeploymentActionState>("idle");
+  const [pagesProject, setPagesProject] = useState(project.pagesProject);
   const importInput = useRef<HTMLInputElement>(null);
 
   const issues = useMemo(() => validateDocument(document), [document]);
@@ -364,12 +518,53 @@ export default function App() {
     });
   };
 
+  const storeProject = (
+    nextProject: SiteProjectSummary,
+    nextProjects = projects,
+  ) => {
+    const updatedProjects = upsertProject(nextProjects, nextProject);
+    saveProjects(window.localStorage, updatedProjects);
+    window.localStorage.setItem(CURRENT_PROJECT_STORAGE_KEY, nextProject.id);
+    setProject(nextProject);
+    setProjects(updatedProjects);
+    setHasExistingProject(true);
+  };
+
+  useEffect(() => {
+    let active = true;
+    detectCompanion().then((detected) => {
+      if (!active) return;
+      setCompanion(detected);
+      setCompanionState(detected ? "available" : "unavailable");
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   useEffect(() => {
     if (!started || !autosaveAllowed) return;
     const timeout = window.setTimeout(() => {
       const result = saveStoredDocument(window.localStorage, document);
       if (result.ok) {
         setSaveState("saved");
+        setProject((currentProject) => {
+          const nextProject = createProjectSummary(document, currentProject);
+          setProjects((currentProjects) => {
+            const updatedProjects = upsertProject(
+              currentProjects,
+              nextProject,
+            );
+            saveProjects(window.localStorage, updatedProjects);
+            return updatedProjects;
+          });
+          window.localStorage.setItem(
+            CURRENT_PROJECT_STORAGE_KEY,
+            nextProject.id,
+          );
+          return nextProject;
+        });
+        setHasExistingProject(true);
       } else if (result.reason === "unsafe-primary") {
         const nextLoad = loadStoredDocument(window.localStorage);
         setRecovery(nextLoad.recovery);
@@ -426,7 +621,7 @@ export default function App() {
       return;
     }
 
-    if (started) {
+    if (hasExistingProject) {
       const confirmed = window.confirm(
         `"${file.name}" 파일을 열면 현재 내용을 교체합니다. 먼저 지금 작업 파일을 저장하고, 되돌리기 기록은 새로 시작합니다.`,
       );
@@ -452,6 +647,10 @@ export default function App() {
     }
 
     dispatch({ type: "replace", document: imported });
+    const importedProject = createProjectSummary(imported);
+    storeProject(importedProject);
+    setPagesProject(importedProject.pagesProject);
+    setDeploymentState({ history: [], deployments: [] });
     setStarted(true);
     setAutosaveAllowed(true);
     setRecovery(null);
@@ -467,14 +666,14 @@ export default function App() {
 
   const startNew = () => {
     if (
-      started &&
+      hasExistingProject &&
       !window.confirm(
         "현재 작업 파일을 먼저 저장한 뒤 새 홈페이지를 시작합니다. 계속할까요?",
       )
     ) {
       return;
     }
-    if (started) {
+    if (hasExistingProject) {
       downloadText(
         `${exportBasename(document.site.name)}-before-new-${safeTimestamp()}.siteboard.json`,
         jsonExport(document),
@@ -483,6 +682,10 @@ export default function App() {
     }
     const blank = createBlankDocument();
     dispatch({ type: "replace", document: blank });
+    const nextProject = createProjectSummary(blank);
+    storeProject(nextProject);
+    setPagesProject(nextProject.pagesProject);
+    setDeploymentState({ history: [], deployments: [] });
     setStarted(true);
     setAutosaveAllowed(true);
     setRecovery(null);
@@ -490,6 +693,17 @@ export default function App() {
     setStep("content");
     setContentPanel("identity");
     setFeedback("상호와 첫 화면 문구부터 입력하세요.");
+  };
+
+  const exportProjectFile = () => {
+    downloadText(
+      `${exportBasename(document.site.name)}.siteboard.json`,
+      jsonExport(document),
+      "application/json",
+    );
+    setFeedback(
+      "작업 파일을 저장했습니다. 로컬 Studio에서 ‘작업 파일 열기’로 불러오세요.",
+    );
   };
 
   const acceptRecovery = () => {
@@ -1360,7 +1574,7 @@ export default function App() {
 
   const exportZip = () => {
     if (errors.length) {
-      setFeedback(`출시 전에 ${errors.length}개 항목을 확인해 주세요.`);
+      setFeedback(`내보내기 전에 ${errors.length}개 항목을 확인해 주세요.`);
       return;
     }
     try {
@@ -1380,6 +1594,140 @@ export default function App() {
       setFeedback(
         error instanceof Error ? error.message : "홈페이지 파일을 만들지 못했습니다.",
       );
+    }
+  };
+
+  const rememberDeployment = (record: DeploymentRecord) => {
+    const nextProject = projectWithDeployment(
+      {
+        ...project,
+        name: document.site.name.trim() || project.name,
+        pagesProject,
+        documentUpdatedAt: document.updatedAt,
+      },
+      record,
+    );
+    storeProject(nextProject);
+  };
+
+  const refreshDeploymentHistory = async () => {
+    if (!companion || !pagesProject.trim()) return;
+    try {
+      setDeploymentState(await loadDeploymentState(pagesProject.trim()));
+      setFeedback("Cloudflare 배포 이력을 새로 확인했습니다.");
+    } catch (error) {
+      setFeedback(
+        error instanceof Error
+          ? error.message
+          : "배포 이력을 확인하지 못했습니다.",
+      );
+    }
+  };
+
+  const publishWebsite = async () => {
+    if (!companion) {
+      setFeedback("컴퓨터에서 siteboard studio를 실행한 뒤 다시 열어 주세요.");
+      return;
+    }
+    if (!companion.cloudflare.authenticated) {
+      setFeedback("터미널에서 wrangler login을 실행한 뒤 Studio를 다시 시작하세요.");
+      return;
+    }
+    if (errors.length) {
+      setFeedback(`배포 전에 ${errors.length}개 필수 항목을 확인해 주세요.`);
+      return;
+    }
+
+    const normalizedProject = pagesProject.trim();
+    const expectedUrl = `https://${normalizedProject}.pages.dev`;
+    const deploymentDocument = document.site.baseUrl.trim()
+      ? document
+      : withTimestamp({
+          ...document,
+          site: { ...document.site, baseUrl: expectedUrl },
+        });
+
+    setDeploymentAction("publishing");
+    setFeedback("Cloudflare Pages에 새 리비전을 배포하고 있습니다.");
+    try {
+      const result = await publishWithCompanion(companion, {
+        projectName: normalizedProject,
+        documentName: deploymentDocument.site.name,
+        publicUrl: deploymentDocument.site.baseUrl,
+        archive: createDeploymentZip(deploymentDocument),
+      });
+      if (!document.site.baseUrl.trim()) {
+        dispatch({ type: "commit", document: deploymentDocument });
+        setSaveState("saving");
+      }
+      setDeploymentState({
+        history: result.history,
+        deployments: result.deployments,
+      });
+      rememberDeployment(result.record);
+      setFeedback(
+        result.warning
+          ? `배포는 완료됐습니다. ${result.warning} 배포 ID ${result.deployment.deploymentId}`
+          : result.verification.ok
+          ? `배포와 공개 주소 확인을 마쳤습니다. 리비전 ${result.record.revision?.slice(0, 12) ?? ""}`
+          : "배포는 완료됐지만 공개 주소 응답을 확인하지 못했습니다. 이력에서 상태를 확인하세요.",
+      );
+    } catch (error) {
+      setFeedback(
+        error instanceof Error ? error.message : "배포를 완료하지 못했습니다.",
+      );
+      try {
+        setDeploymentState(await loadDeploymentState(normalizedProject));
+      } catch {
+        // The visible error above remains the useful failure.
+      }
+    } finally {
+      setDeploymentAction("idle");
+    }
+  };
+
+  const rollbackDeployment = async (deploymentId: string) => {
+    if (!companion) return;
+    if (
+      !window.confirm(
+        "선택한 정상 production 배포로 즉시 되돌릴까요? 현재 배포는 이력에 그대로 남습니다.",
+      )
+    ) {
+      return;
+    }
+    setDeploymentAction("rolling-back");
+    setFeedback("선택한 production 배포로 복구하고 있습니다.");
+    try {
+      const result = await rollbackWithCompanion(companion, {
+        projectName: pagesProject.trim(),
+        deploymentId,
+        publicUrl:
+          document.site.baseUrl.trim() ||
+          `https://${pagesProject.trim()}.pages.dev`,
+      });
+      setDeploymentState({
+        history: result.history,
+        deployments: result.deployments,
+      });
+      rememberDeployment(result.record);
+      setFeedback(
+        result.warning
+          ? `복구 요청은 완료됐습니다. ${result.warning} 배포 ID ${result.deployment.deploymentId}`
+          : result.verification.ok
+          ? "이전 production 배포로 복구하고 공개 주소까지 확인했습니다."
+          : "복구 요청은 완료됐지만 공개 주소 응답을 확인하지 못했습니다.",
+      );
+    } catch (error) {
+      setFeedback(
+        error instanceof Error ? error.message : "이전 배포로 복구하지 못했습니다.",
+      );
+      try {
+        setDeploymentState(await loadDeploymentState(pagesProject.trim()));
+      } catch {
+        // The rollback error remains visible when history refresh also fails.
+      }
+    } finally {
+      setDeploymentAction("idle");
     }
   };
 
@@ -1423,11 +1771,11 @@ export default function App() {
 
       <section className="editor-card launch-card">
         <header>
-          <p>출시 점검</p>
+          <p>배포 점검</p>
           <h3>
             {errors.length
-              ? `${errors.length}개 항목을 마치면 파일을 받을 수 있습니다.`
-              : "홈페이지 파일을 받을 준비가 끝났습니다."}
+              ? `${errors.length}개 항목을 마치면 배포할 수 있습니다.`
+              : "새 리비전을 배포할 준비가 끝났습니다."}
           </h3>
         </header>
         <ul className="launch-checks">
@@ -1439,7 +1787,7 @@ export default function App() {
           ))}
         </ul>
         {issues.length ? (
-          <ul className="issue-list" aria-label="출시 점검 결과">
+          <ul className="issue-list" aria-label="배포 점검 결과">
             {issues.map((item) => (
               <li key={item.id}>
                 <button type="button" onClick={() => setTarget(item.target)}>
@@ -1450,26 +1798,204 @@ export default function App() {
             ))}
           </ul>
         ) : null}
-        <button
-          className="download-button"
-          type="button"
-          disabled={errors.length > 0}
-          onClick={exportZip}
+      </section>
+
+      <section className="editor-card deployment-card">
+        <header>
+          <p>Cloudflare Pages</p>
+          <h3>배포하고 실제 공개 주소를 확인합니다.</h3>
+        </header>
+        <Field
+          label="Cloudflare Pages 프로젝트"
+          hint="영문 소문자, 숫자, 가운데 하이픈을 사용합니다. 없으면 첫 배포 때 만듭니다."
         >
-          홈페이지 파일 받기
-        </button>
+          <input
+            value={pagesProject}
+            spellCheck={false}
+            onChange={(event) => setPagesProject(event.target.value)}
+            onBlur={() =>
+              storeProject({ ...project, pagesProject: pagesProject.trim() })
+            }
+          />
+        </Field>
+
+        <div
+          className={`companion-state companion-state--${companionState}`}
+          role="status"
+        >
+          <span aria-hidden="true" />
+          <div>
+            <strong>
+              {companionState === "checking"
+                ? "Studio 연결 확인 중"
+                : companionState === "available"
+                  ? companion?.cloudflare.authenticated
+                    ? "로컬 Studio와 Cloudflare 연결됨"
+                    : "Studio 연결됨 · Cloudflare 로그인 필요"
+                  : "브라우저 편집 모드"}
+            </strong>
+            <p>
+              {companionState === "available"
+                ? companion?.cloudflare.authenticated
+                  ? companion.cloudflare.selectedAccountId
+                    ? "토큰은 브라우저로 전달하거나 저장하지 않습니다."
+                    : "계정이 여러 개면 CLOUDFLARE_ACCOUNT_ID를 지정하고 Studio를 다시 실행하세요."
+                  : "터미널에서 wrangler login을 실행하고 Studio를 다시 시작하세요."
+                : "실제 배포와 복구는 로컬 Studio companion이 맡습니다."}
+            </p>
+          </div>
+        </div>
+
+        {companionState === "unavailable" ? (
+          <div className="studio-guide">
+            <strong>Studio에서 열기</strong>
+            <ol>
+              <li>GitHub v3.0.0 릴리스의 npm 패키지를 전역 설치합니다.</li>
+              <li>npx wrangler login으로 Cloudflare에 로그인합니다.</li>
+              <li>siteboard studio를 실행해 열린 화면에서 배포합니다.</li>
+            </ol>
+            <a href={STUDIO_RELEASE_URL} target="_blank" rel="noreferrer">
+              v3.0.0 설치 파일과 명령 보기 ↗
+            </a>
+          </div>
+        ) : null}
+
+        <div className="deployment-actions">
+          <button
+            className="publish-button"
+            type="button"
+            disabled={
+              errors.length > 0 ||
+              deploymentAction !== "idle" ||
+              companionState !== "available" ||
+              !companion?.cloudflare.authenticated ||
+              !companion.cloudflare.selectedAccountId
+            }
+            onClick={publishWebsite}
+          >
+            {deploymentAction === "publishing"
+              ? "배포하고 확인하는 중…"
+              : "새 리비전 배포"}
+          </button>
+          <button
+            type="button"
+            disabled={
+              deploymentAction !== "idle" ||
+              companionState !== "available"
+            }
+            onClick={refreshDeploymentHistory}
+          >
+            배포 이력 새로고침
+          </button>
+          <button
+            type="button"
+            disabled={errors.length > 0}
+            onClick={exportZip}
+          >
+            ZIP 내보내기
+          </button>
+        </div>
         <p className="package-note">
-          홈페이지 본문, 추가한 이미지, 올리는 방법 안내가 함께 들어갑니다.
-          공개 주소를 입력하면 검색용 주소 파일도 만듭니다.
+          ZIP 내보내기는 언제든 사용할 수 있습니다. 배포 인증과 이력 파일은
+          현재 컴퓨터의 로컬 Studio에서 관리합니다.
         </p>
       </section>
+
+      {deploymentState.deployments.length ? (
+        <section className="editor-card deployment-history-card">
+          <header>
+            <p>Production 배포</p>
+            <h3>현재 버전과 복구 가능한 이전 버전입니다.</h3>
+          </header>
+          <ol className="cloudflare-deployments">
+            {deploymentState.deployments.map((deployment) => (
+              <li key={deployment.deploymentId}>
+                <div>
+                  <span>{deployment.current ? "현재" : "이전"}</span>
+                  <strong>
+                    {deployment.source || deployment.deploymentId.slice(0, 12)}
+                  </strong>
+                  <small>{deployment.status}</small>
+                </div>
+                <div>
+                  <a href={deployment.url} target="_blank" rel="noreferrer">
+                    주소 열기 ↗
+                  </a>
+                  {deployment.rollbackable ? (
+                    <button
+                      type="button"
+                      disabled={deploymentAction !== "idle"}
+                      onClick={() =>
+                        rollbackDeployment(deployment.deploymentId)
+                      }
+                    >
+                      이 배포로 복구
+                    </button>
+                  ) : null}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
+
+      {deploymentState.history.length ? (
+        <section className="editor-card deployment-history-card">
+          <header>
+            <p>로컬 운영 이력</p>
+            <h3>성공, 실패, 복구 결과를 변경 없이 이어서 기록합니다.</h3>
+          </header>
+          <ol className="local-deployment-history">
+            {deploymentState.history.map((record) => (
+              <li key={record.eventId}>
+                <span
+                  className={`history-status history-status--${record.status}`}
+                >
+                  {deploymentStatusLabel(record)}
+                </span>
+                <div>
+                  <strong>
+                    {record.operation === "publish" ? "배포" : "복구"}
+                    {record.revision
+                      ? ` · ${record.revision.slice(0, 12)}`
+                      : ""}
+                  </strong>
+                  <small>
+                    {new Intl.DateTimeFormat("ko-KR", {
+                      dateStyle: "medium",
+                      timeStyle: "short",
+                    }).format(new Date(record.createdAt))}
+                  </small>
+                  {record.message ? <p>{record.message}</p> : null}
+                </div>
+                {record.productionUrl ? (
+                  <a href={record.productionUrl} target="_blank" rel="noreferrer">
+                    공개 주소 ↗
+                  </a>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
     </div>
   );
 
+  const openDashboard = () => {
+    if (!started) return;
+    if (started && autosaveAllowed) {
+      const saved = saveStoredDocument(window.localStorage, document);
+      setSaveState(saved.ok ? "saved" : "error");
+    }
+    const nextProject = createProjectSummary(document, project);
+    storeProject(nextProject);
+    setStarted(false);
+  };
+
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#editor-main">
-        편집 화면으로 이동
+      <a className="skip-link" href={started ? "#editor-main" : "#dashboard"}>
+        {started ? "편집 화면으로 이동" : "프로젝트 화면으로 이동"}
       </a>
       <input
         className="sr-only"
@@ -1481,10 +2007,15 @@ export default function App() {
       />
 
       <header className="app-header">
-        <div className="brand-button" aria-label="Siteboard">
+        <button
+          className="brand-button"
+          type="button"
+          aria-label="Siteboard 프로젝트 화면"
+          onClick={openDashboard}
+        >
           <span aria-hidden="true">S</span>
           <strong>Siteboard</strong>
-        </div>
+        </button>
         {started ? (
           <>
             <p
@@ -1535,13 +2066,7 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() =>
-                    downloadText(
-                      `${exportBasename(document.site.name)}.siteboard.json`,
-                      jsonExport(document),
-                      "application/json",
-                    )
-                  }
+                  onClick={exportProjectFile}
                 >
                   작업 파일 백업
                 </button>
@@ -1551,7 +2076,7 @@ export default function App() {
                 type="button"
                 onClick={() => setStep("launch")}
               >
-                출시 준비
+                배포 관리
               </button>
             </div>
           </>
@@ -1584,14 +2109,24 @@ export default function App() {
       </p>
 
       {!started ? (
-        <StartScreen
+        <ProjectDashboard
+          project={project}
+          hasExistingProject={hasExistingProject}
+          companionState={companionState}
+          companion={companion}
+          onContinue={() => {
+            setStarted(true);
+            setAutosaveAllowed(!recovery);
+            setSaveState(recovery ? "recovery" : "saved");
+          }}
           onCreate={startNew}
           onOpen={() => importInput.current?.click()}
+          onExport={exportProjectFile}
         />
       ) : (
         <main className="workspace" id="editor-main">
-          <nav className="step-nav" aria-label="홈페이지 제작 단계">
-            <p>제작 단계</p>
+          <nav className="step-nav" aria-label="홈페이지 관리 단계">
+            <p>관리 단계</p>
             {steps.map(([value, number, label]) => (
               <button
                 type="button"
@@ -1611,7 +2146,7 @@ export default function App() {
                 {launchChecks.filter((item) => item.complete).length}/
                 {launchChecks.length}
               </span>
-              <p>출시 준비 완료</p>
+              <p>배포 준비 완료</p>
               {warnings.length ? <small>권장 {warnings.length}개</small> : null}
             </div>
           </nav>
@@ -1625,7 +2160,7 @@ export default function App() {
                     ? "구성"
                     : step === "style"
                       ? "스타일"
-                      : "출시"}
+                      : "배포"}
               </p>
               <h2 id="editor-title">
                 {step === "content"
@@ -1634,7 +2169,7 @@ export default function App() {
                     ? "보여줄 순서를 정합니다."
                     : step === "style"
                       ? "화면 인상을 고릅니다."
-                      : "공개할 파일을 준비합니다."}
+                      : "새 버전을 배포하고 복구합니다."}
               </h2>
             </header>
             {step === "content" ? renderContent() : null}

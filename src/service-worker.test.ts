@@ -37,7 +37,7 @@ function createHarness(fetchResult?: object) {
   };
   const fetchMock = vi.fn(async () => fetchResult);
   const workerSelf = {
-    registration: { scope: "https://example.test/siteboard/" },
+    registration: { scope: "https://siteboard.whago.net/" },
     clients: { claim: vi.fn(async () => undefined) },
     skipWaiting: vi.fn(async () => undefined),
     addEventListener: vi.fn((name: string, listener: WorkerListener) => {
@@ -69,7 +69,7 @@ function request(
     method: options.method ?? "GET",
     mode: options.mode ?? "cors",
     destination: options.destination ?? "script",
-    url: new URL(path, "https://example.test").href,
+    url: new URL(path, "https://siteboard.whago.net").href,
   };
 }
 
@@ -98,7 +98,7 @@ describe("Siteboard service worker", () => {
     expect(harness.workerSelf.clients.claim).toHaveBeenCalledOnce();
   });
 
-  it("ignores same-origin requests outside the /siteboard/ scope", async () => {
+  it("handles its independent origin and ignores external origins", async () => {
     const networkResponse = {
       ok: true,
       clone: vi.fn(() => ({})),
@@ -109,14 +109,6 @@ describe("Siteboard service worker", () => {
     const fetchListener = harness.listeners.get("fetch");
 
     fetchListener?.({
-      request: request("/daymark/app.js"),
-      respondWith,
-    });
-    fetchListener?.({
-      request: request("/siteboard-old/app.js"),
-      respondWith,
-    });
-    fetchListener?.({
       request: request("https://cdn.example.test/siteboard/app.js"),
       respondWith,
     });
@@ -124,7 +116,7 @@ describe("Siteboard service worker", () => {
     expect(respondWith).not.toHaveBeenCalled();
 
     fetchListener?.({
-      request: request("/siteboard/assets/app.js"),
+      request: request("/assets/app.js"),
       respondWith,
     });
     expect(respondWith).toHaveBeenCalledOnce();
@@ -139,7 +131,7 @@ describe("Siteboard service worker", () => {
       headers: { get: vi.fn(() => "text/html") },
     };
     const harness = createHarness(networkResponse);
-    const navigationRequest = request("/siteboard/", {
+    const navigationRequest = request("/", {
       mode: "navigate",
       destination: "document",
     });
@@ -158,7 +150,7 @@ describe("Siteboard service worker", () => {
       responseCopy,
     );
     expect(harness.cache.put).toHaveBeenCalledWith(
-      "https://example.test/siteboard/index.html",
+      "https://siteboard.whago.net/index.html",
       responseCopy,
     );
   });
@@ -174,7 +166,7 @@ describe("Siteboard service worker", () => {
     let responsePromise: Promise<unknown> | undefined;
 
     harness.listeners.get("fetch")?.({
-      request: request("/siteboard/", {
+      request: request("/", {
         mode: "navigate",
         destination: "document",
       }),

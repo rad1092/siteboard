@@ -19,7 +19,7 @@ const SHELL = [
   "./icon-512.png",
 ];
 
-function isInSiteboardScope(url) {
+function isInAppScope(url) {
   return (
     url.origin === SCOPE_URL.origin &&
     url.pathname.startsWith(SCOPE_URL.pathname)
@@ -63,7 +63,7 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
 
   const requestUrl = new URL(request.url);
-  if (!isInSiteboardScope(requestUrl)) return;
+  if (!isInAppScope(requestUrl)) return;
 
   if (request.mode === "navigate") {
     event.respondWith(

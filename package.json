@@ -1,20 +1,43 @@
 {
   "name": "siteboard",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "siteboard": "./cli/siteboard.js"
+  },
+  "files": [
+    "cli/archive.js",
+    "cli/cloudflare-api.js",
+    "cli/cloudflare.js",
+    "cli/command-runner.js",
+    "cli/history-store.js",
+    "cli/live-verify.js",
+    "cli/server.js",
+    "cli/siteboard.js",
+    "cli/studio-operations.js",
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "studio": "node ./cli/siteboard.js studio",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "fflate": "^0.8.3",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "wrangler": "^4.115.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -18,6 +18,7 @@ const status: CompanionStatus = {
   },
   capabilities: {
     publish: true,
+    binding: true,
     history: true,
     rollback: true,
     liveVerify: true,
@@ -43,7 +44,7 @@ describe("browser companion client", () => {
       });
       const body = String(init?.body);
       expect(body).toContain(bytesToBase64(new Uint8Array([1, 2, 3])));
-      expect(body).not.toMatch(/OAuth|account-1|Cloudflare.*token/i);
+      expect(body).not.toMatch(/OAuth|Cloudflare.*token|Bearer|secret/i);
       return new Response(
         JSON.stringify({
           record: { status: "live" },
@@ -59,7 +60,15 @@ describe("browser companion client", () => {
     await publishWithCompanion(
       status,
       {
-        projectName: "example",
+        binding: {
+          provider: "cloudflare-pages",
+          accountId: "account-1",
+          projectName: "example",
+          projectId: "project-1",
+          publicOrigin: "https://www.example.com",
+          existedWhenBound: true,
+          boundAt: "2026-07-29T00:00:00.000Z",
+        },
         documentName: "Example",
         publicUrl: "https://www.example.com",
         archive: new Uint8Array([1, 2, 3]),

@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { afterEach, describe, expect, it } from "vitest";
-import { extractDeploymentArchive, safeArchivePath } from "./archive.js";
+import {
+  extractDeploymentArchive,
+  safeArchivePath,
+  writeRevisionMarker,
+} from "./archive.js";
 
 const directories = [];
 
@@ -74,5 +78,15 @@ describe("deployment archive extraction", () => {
     expect(safeArchivePath(directory, "assets/image.png")).toBe(
       join(directory, "assets", "image.png"),
     );
+  });
+
+  it("writes the immutable deployment revision marker", async () => {
+    const directory = await temporaryDirectory();
+    await writeRevisionMarker(directory, "a".repeat(64));
+    expect(
+      JSON.parse(
+        await readFile(join(directory, "siteboard-revision.json"), "utf8"),
+      ),
+    ).toEqual({ schemaVersion: 1, revision: "a".repeat(64) });
   });
 });

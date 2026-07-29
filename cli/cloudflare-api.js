@@ -29,6 +29,15 @@ function apiErrorMessage(payload, status) {
   return message.slice(0, 500);
 }
 
+export class CloudflareApiError extends Error {
+  constructor(message, { status, code = "" } = {}) {
+    super(message);
+    this.name = "CloudflareApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 export class CloudflareApiClient {
   constructor({
     fetchImpl = fetch,
@@ -56,13 +65,21 @@ export class CloudflareApiClient {
     try {
       payload = await response.json();
     } catch {
-      throw new Error(
+      throw new CloudflareApiError(
         `Cloudflare API returned an invalid response (${response.status}).`,
+        { status: response.status },
       );
     }
 
     if (!response.ok || payload?.success !== true || payload.result == null) {
-      throw new Error(apiErrorMessage(payload, response.status));
+      const first = Array.isArray(payload?.errors) ? payload.errors[0] : null;
+      throw new CloudflareApiError(apiErrorMessage(payload, response.status), {
+        status: response.status,
+        code:
+          first && (typeof first.code === "number" || typeof first.code === "string")
+            ? String(first.code)
+            : "",
+      });
     }
     return payload.result;
   }

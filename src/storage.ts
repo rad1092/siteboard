@@ -1,4 +1,10 @@
 import { createBlankDocument } from "./data";
+import {
+  emptyWorkspace,
+  exportProjectFile,
+  parseProjectFile,
+  type WorkspaceState,
+} from "./project-file";
 import { parseImportedDocument } from "./site";
 import type { SiteDocument } from "./types";
 
@@ -7,6 +13,9 @@ export const DOCUMENT_BACKUP_KEY = "siteboard.document.backup.v2";
 export const DOCUMENT_RECOVERY_KEY = "siteboard.document.recovery.raw";
 export const LEGACY_DOCUMENT_STORAGE_KEY = "siteboard.document.v1";
 export const LEGACY_DOCUMENT_BACKUP_KEY = "siteboard.document.backup.v1";
+export const PROJECT_STORAGE_KEY = "siteboard.project.v1";
+export const PROJECT_BACKUP_KEY = "siteboard.project.backup.v1";
+export const PROJECT_RECOVERY_KEY = "siteboard.project.recovery.raw";
 
 export type RecoveryKind = "corrupt" | "future-schema";
 
@@ -20,6 +29,10 @@ export interface StoredDocumentResult {
   document: SiteDocument;
   source: "primary" | "backup" | "migrated" | "starter";
   recovery: StorageRecovery | null;
+}
+
+export interface StoredProjectResult extends StoredDocumentResult {
+  workspace: WorkspaceState;
 }
 
 interface SaveOptions {
@@ -36,9 +49,14 @@ function recoveryKind(raw: string): RecoveryKind {
     if (
       typeof parsed === "object" &&
       parsed !== null &&
-      "schemaVersion" in parsed &&
-      typeof parsed.schemaVersion === "number" &&
-      parsed.schemaVersion > 2
+      (("schemaVersion" in parsed &&
+        typeof parsed.schemaVersion === "number" &&
+        parsed.schemaVersion > 2) ||
+        ("fileType" in parsed &&
+          parsed.fileType === "siteboard-project" &&
+          "fileSchemaVersion" in parsed &&
+          typeof parsed.fileSchemaVersion === "number" &&
+          parsed.fileSchemaVersion > 1))
     ) {
       return "future-schema";
     }
@@ -147,6 +165,109 @@ export function saveStoredDocument(
     }
 
     storage.setItem(DOCUMENT_STORAGE_KEY, serialized);
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: "storage-error" };
+  }
+}
+
+function validProject(raw: string | null) {
+  if (!raw) return null;
+  const result = parseProjectFile(raw);
+  return result.ok ? result.project : null;
+}
+
+function preserveProjectRecovery(
+  storage: Storage,
+  raw: string,
+): boolean {
+  try {
+    storage.setItem(PROJECT_RECOVERY_KEY, raw);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function loadStoredProject(storage: Storage): StoredProjectResult {
+  const primaryRaw = storage.getItem(PROJECT_STORAGE_KEY);
+  const primary = validProject(primaryRaw);
+  if (primary) {
+    return {
+      document: primary.document,
+      workspace: {
+        schemaVersion: 1,
+        binding: primary.binding,
+        snapshots: primary.snapshots,
+        lastDeployment: primary.lastDeployment,
+      },
+      source: "primary",
+      recovery: null,
+    };
+  }
+
+  const preservedInStorage = primaryRaw
+    ? preserveProjectRecovery(storage, primaryRaw)
+    : false;
+  const backup = validProject(storage.getItem(PROJECT_BACKUP_KEY));
+  if (backup) {
+    return {
+      document: backup.document,
+      workspace: {
+        schemaVersion: 1,
+        binding: backup.binding,
+        snapshots: backup.snapshots,
+        lastDeployment: backup.lastDeployment,
+      },
+      source: "backup",
+      recovery: primaryRaw
+        ? {
+            kind: recoveryKind(primaryRaw),
+            raw: primaryRaw,
+            preservedInStorage,
+          }
+        : null,
+    };
+  }
+
+  const legacy = loadStoredDocument(storage);
+  return {
+    ...legacy,
+    workspace: emptyWorkspace(),
+    recovery: primaryRaw
+      ? {
+          kind: recoveryKind(primaryRaw),
+          raw: primaryRaw,
+          preservedInStorage,
+        }
+      : legacy.recovery,
+  };
+}
+
+export function saveStoredProject(
+  storage: Storage,
+  document: SiteDocument,
+  workspace: WorkspaceState,
+  options: SaveOptions = {},
+): SaveDocumentResult {
+  try {
+    const serialized = exportProjectFile(document, workspace);
+    const primaryRaw = storage.getItem(PROJECT_STORAGE_KEY);
+    const primary = validProject(primaryRaw);
+    if (primaryRaw && !primary) {
+      if (!options.allowUnsafePrimaryReplacement) {
+        return { ok: false, reason: "unsafe-primary" };
+      }
+      if (!preserveProjectRecovery(storage, primaryRaw)) {
+        return { ok: false, reason: "storage-error" };
+      }
+    }
+    if (primaryRaw && primary) {
+      storage.setItem(PROJECT_BACKUP_KEY, primaryRaw);
+    } else if (!primaryRaw || !validProject(storage.getItem(PROJECT_BACKUP_KEY))) {
+      storage.setItem(PROJECT_BACKUP_KEY, serialized);
+    }
+    storage.setItem(PROJECT_STORAGE_KEY, serialized);
     return { ok: true };
   } catch {
     return { ok: false, reason: "storage-error" };

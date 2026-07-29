@@ -47,7 +47,7 @@ describe("Siteboard 제작 흐름", () => {
       await screen.findByRole("link", { name: "Studio 설치 ↗" }),
     ).toHaveAttribute(
       "href",
-      "https://github.com/rad1092/siteboard/releases/tag/v3.0.0",
+      "https://github.com/rad1092/siteboard/releases/latest",
     );
     expect(
       screen.getByRole("button", { name: "새 홈페이지 만들기" }),

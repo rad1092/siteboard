@@ -17,7 +17,7 @@ afterEach(async () => {
   );
 });
 
-async function startServer() {
+async function startServer(startupProject = null) {
   const directory = await mkdtemp(join(tmpdir(), "siteboard-server-test-"));
   directories.push(directory);
   await writeFile(join(directory, "index.html"), "<h1>Studio</h1>");
@@ -34,11 +34,17 @@ async function startServer() {
       history: [],
       deployments: [],
     })),
+    inspectTarget: vi.fn(async ({ projectName, publicOrigin }) => ({
+      projectName,
+      publicOrigin,
+      exists: false,
+    })),
   };
   const studio = createStudioServer({
     staticDirectory: directory,
     operations,
     csrfToken: "csrf-for-test",
+    startupProject,
   });
   servers.push(studio);
   const address = await studio.listen(0);
@@ -113,5 +119,29 @@ describe("localhost companion server security", () => {
     const text = await response.text();
     expect(text).toContain('"csrfToken":"csrf-for-test"');
     expect(text).not.toMatch(/api[_-]?token|Bearer|secret/i);
+  });
+
+  it("serves an explicitly supplied startup project once without exposing its path", async () => {
+    const { origin } = await startServer({
+      fileName: "corner.siteboard.json",
+      content: '{"fileType":"siteboard-project"}',
+    });
+    const status = await (await fetch(`${origin}/api/companion/status`)).json();
+    expect(status.startupFile).toBe("corner.siteboard.json");
+    const startup = await (
+      await fetch(`${origin}/api/startup-project`)
+    ).json();
+    expect(startup).toEqual({
+      fileName: "corner.siteboard.json",
+      content: '{"fileType":"siteboard-project"}',
+    });
+    expect(JSON.stringify(status)).not.toContain("/");
+    expect(
+      (await fetch(`${origin}/api/startup-project`)).status,
+    ).toBe(404);
+    const consumedStatus = await (
+      await fetch(`${origin}/api/companion/status`)
+    ).json();
+    expect(consumedStatus.startupFile).toBe("");
   });
 });

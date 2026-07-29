@@ -16,10 +16,12 @@ Cloudflare 인증은 브라우저로 전달하거나 브라우저 저장소에 �
    확인합니다.
 3. Studio에서 Cloudflare Pages 프로젝트 이름을 정해 새 production
    리비전을 배포합니다.
-4. Siteboard가 실제 공개 주소의 HTTP 응답을 확인하고 로컬 이력에
+4. Siteboard가 Cloudflare API의 현재 production, 연결한 프로젝트 ID,
+   실제 공개 주소의 64자리 콘텐츠 리비전을 차례로 확인하고 로컬 이력에
    결과를 추가합니다.
 5. 문제가 생기면 정상적으로 완료된 이전 production deployment를 골라
-   Cloudflare Pages Rollback API로 복구하고 다시 공개 주소를 확인합니다.
+   고정 배포 주소의 리비전을 먼저 확인한 뒤 Cloudflare Pages Rollback
+   API로 복구하고 현재 production과 공개 주소를 다시 확인합니다.
 
 ZIP 내보내기, JSON 백업·가져오기, 미리보기와 검증은 Studio 없이
 `https://siteboard.whago.net/`에서도 사용할 수 있습니다.
@@ -36,7 +38,8 @@ ZIP 내보내기, JSON 백업·가져오기, 미리보기와 검증은 Studio �
 - v2 JSON 백업·가져오기와 v1 문서 자동 이전
 - 정적 `index.html`, 이미지, 검색 파일, 배포 안내를 담은 ZIP 생성
 - Cloudflare Pages Direct Upload 프로젝트 자동 생성과 production 배포
-- 실제 배포 URL, 콘텐츠 리비전, 검증 결과의 append-only 로컬 이력
+- API가 확인한 production 배포, 콘텐츠 리비전, 공개 검증 결과의
+  append-only 로컬 이력
 - Cloudflare production deployment 조회와 이전 정상 배포 롤백
 - 배포 실패, 검증 실패, 복구 성공, 복구 후 검증 실패를 구분한 상태
 - 독립 루트 범위에서 설치 가능한 오프라인 편집 PWA
@@ -47,7 +50,7 @@ Node.js 22 이상이 필요합니다.
 
 ```bash
 npm install --global \
-  https://github.com/rad1092/siteboard/releases/download/v3.0.0/siteboard-3.0.0.tgz
+  https://github.com/rad1092/siteboard/releases/download/v4.0.0/siteboard-4.0.0.tgz
 npx wrangler login
 siteboard studio
 ```
@@ -105,17 +108,18 @@ siteboard studio
 
 ## 데이터와 이력
 
-현재 편집 문서는 `siteboard.document.v2`, 직전 정상 문서는
-`siteboard.document.backup.v2`에 저장됩니다. 기존 v1 키는 변경하지
-않고 v2 문서로 이전합니다.
+현재 편집 문서, Cloudflare 연결, 편집 저장본과 마지막 배포는
+`siteboard.project.v1` 작업 envelope에 함께 저장하고 직전 정상
+작업은 `siteboard.project.backup.v1`에 보관합니다. 기존 문서 v1·v2
+키는 변경하지 않고 새 작업 형식으로 읽어 옵니다.
 
-손상됐거나 더 최신 형식인 기본 저장 데이터는
-`siteboard.document.recovery.raw`에 보존하고 사용자가 선택할 때까지
-자동 저장을 멈춥니다.
+손상됐거나 더 최신 형식인 작업 원본은
+`siteboard.project.recovery.raw`에 그대로 보존하고 사용자가 선택할
+때까지 자동 저장을 멈춥니다. 기존 문서 형식의 복구 원본은
+`siteboard.document.recovery.raw`에 남깁니다.
 
-최근 프로젝트 요약은 `siteboard.projects.v1`에 저장합니다. Cloudflare
-배포와 복구의 원본 운영 이력은 companion이 다음 append-only JSONL
-파일에 추가합니다.
+Cloudflare 배포와 복구의 원본 운영 이력은 companion이 다음
+append-only JSONL 파일에 추가합니다.
 
 ```text
 ~/.siteboard/deployment-history.jsonl
@@ -138,7 +142,11 @@ siteboard studio
 - ZIP의 절대 경로, 역슬래시, 빈 경로 조각과 `..` 이동을 거절합니다.
 - 압축 크기, 해제 후 크기와 파일 수를 제한하고 임시 폴더 밖에는 쓰지
   않습니다.
-- 공개 주소 검증은 HTTPS와 공인 네트워크 주소만 허용합니다.
+- 공개 주소 검증은 HTTPS와 공인 네트워크 주소만 허용하고 모든
+  리디렉션 단계의 주소를 다시 검사합니다.
+- 공개 중인 파일은 정확한 64자리 리비전 표식이 API production과
+  연결될 때만 정상으로 기록합니다.
+- 시작 인자로 전달한 작업 파일 내용은 브라우저에 한 번만 제공합니다.
 - Wrangler 로그 정화를 켜고 오류 보고와 측정 전송을 끕니다.
 - 토큰과 인증 헤더는 콘솔, 브라우저, 이력에 기록하지 않습니다.
 
@@ -178,10 +186,11 @@ npm run lint
 npm run build
 ```
 
-테스트는 기존 편집·복구·ZIP 기능과 함께 command runner, Wrangler 출력
-파싱, rollback API, append-only 이력, ZIP 경로 traversal, localhost
-Host/Origin/CSRF 경계, 브라우저 토큰 비노출, publish→verify→history와
-rollback→verify→recovery 흐름을 확인합니다.
+테스트는 기존 편집·복구·ZIP 기능과 함께 command runner, Cloudflare
+canonical production 수렴, rollback API, 고정 배포 사전검증,
+append-only 이력, ZIP 경로 traversal, localhost Host/Origin/CSRF
+경계, 예약 주소와 리디렉션 차단, 브라우저 토큰 비노출,
+publish→verify→history와 rollback→verify→recovery 흐름을 확인합니다.
 
 ## License
 

@@ -5,6 +5,7 @@ import { unzipSync } from "fflate";
 export const MAX_ARCHIVE_BYTES = 12 * 1024 * 1024;
 export const MAX_UNPACKED_BYTES = 32 * 1024 * 1024;
 export const MAX_ARCHIVE_FILES = 2_000;
+export const REVISION_MARKER_PATH = "siteboard-revision.json";
 
 function strictBase64(value) {
   if (
@@ -72,4 +73,20 @@ export async function extractDeploymentArchive(archiveBase64, directory) {
     fileCount: entries.length,
     archiveBytes: compressed,
   };
+}
+
+export async function writeRevisionMarker(directory, revision) {
+  if (typeof revision !== "string" || !/^[a-f0-9]{64}$/.test(revision)) {
+    throw new Error("배포 리비전이 올바르지 않습니다.");
+  }
+  const target = safeArchivePath(directory, REVISION_MARKER_PATH);
+  await writeFile(
+    target,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      revision,
+    })}\n`,
+    { encoding: "utf8", flag: "wx" },
+  );
+  return target;
 }

@@ -1,6 +1,6 @@
 {
   "name": "siteboard",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -25,7 +25,14 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "npm run build:web",
+    "build:web": "tsc --noEmit && vite build",
+    "desktop": "tauri dev",
+    "desktop:build": "tauri build",
+    "desktop:build:debug": "tauri build --debug --no-bundle",
+    "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "desktop:icon": "tauri icon public/icon-512.png",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -34,6 +41,9 @@
     "prepare": "npm run build"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "fflate": "^0.8.3",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
@@ -41,6 +51,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@tauri-apps/cli": "^2.11.4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",
     "@types/node": "^22.19.0",

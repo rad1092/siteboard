@@ -1,13 +1,19 @@
 # Siteboard
 
-Siteboard는 사업 홈페이지의 내용 편집, 화면 확인, Cloudflare Pages 배포,
-공개 주소 검증, 배포 이력과 이전 production 복구를 한 흐름으로 관리하는
-로컬 우선 도구입니다.
+Siteboard는 운영체제에 설치하는 로컬 우선 홈페이지 제작 소프트웨어입니다.
+사업 홈페이지의 내용 편집, 컴퓨터·휴대전화 화면 확인, 정적 배포 파일 생성과
+프로젝트 복구를 한 창에서 처리합니다.
 
-편집 문서는 브라우저에 자동 저장되고 JSON으로 백업할 수 있습니다.
-Cloudflare 인증은 브라우저로 전달하거나 브라우저 저장소에 넣지 않습니다.
-실제 배포와 복구는 `127.0.0.1`에서 실행되는 Siteboard Studio companion이
-담당합니다.
+데스크톱 본체는 원격 웹사이트를 띄우지 않습니다. 빌드에 포함된 화면을
+Tauri 2의 시스템 WebView에서 실행하고, 프로젝트는 앱 데이터 폴더 또는
+사용자가 정한 `.siteboard` 파일에 원자적으로 저장합니다. 직전 정상 파일과
+손상 원본을 별도로 보존합니다.
+
+Cloudflare 자격 증명은 프로젝트, WebView 저장소, 앱 번들에 넣지 않습니다.
+Cloudflare Pages 직접 배포와 production 복구는 현재 공식 Wrangler 인증을
+사용하는 로컬 companion 경계가 담당합니다. 데스크톱만으로는 검증된 정적
+ZIP까지 만들 수 있으며, 지원하지 않는 직접 배포를 지원되는 것처럼 표시하지
+않습니다.
 
 ## 운영 흐름
 
@@ -23,8 +29,8 @@ Cloudflare 인증은 브라우저로 전달하거나 브라우저 저장소에 �
    고정 배포 주소의 리비전을 먼저 확인한 뒤 Cloudflare Pages Rollback
    API로 복구하고 현재 production과 공개 주소를 다시 확인합니다.
 
-ZIP 내보내기, JSON 백업·가져오기, 미리보기와 검증은 Studio 없이
-`https://siteboard.whago.net/`에서도 사용할 수 있습니다.
+`https://siteboard.whago.net/`은 파일 설치 전 확인할 수 있는 웹 데모입니다.
+웹 데모의 브라우저 저장소는 데스크톱 프로젝트 저장소와 분리됩니다.
 
 ## 주요 기능
 
@@ -35,43 +41,59 @@ ZIP 내보내기, JSON 백업·가져오기, 미리보기와 검증은 Studio �
 - 컴퓨터·휴대전화 미리보기
 - 100단계 편집 되돌리기·다시 실행
 - 필수 정보, 연락 링크, 이미지와 공개 주소 점검
-- v2 JSON 백업·가져오기와 v1 문서 자동 이전
+- `.siteboard` 프로젝트 저장·열기, JSON 백업 호환과 v1 문서 자동 이전
 - 정적 `index.html`, 이미지, 검색 파일, 배포 안내를 담은 ZIP 생성
 - Cloudflare Pages Direct Upload 프로젝트 자동 생성과 production 배포
 - API가 확인한 production 배포, 콘텐츠 리비전, 공개 검증 결과의
   append-only 로컬 이력
 - Cloudflare production deployment 조회와 이전 정상 배포 롤백
 - 배포 실패, 검증 실패, 복구 성공, 복구 후 검증 실패를 구분한 상태
-- 독립 루트 범위에서 설치 가능한 오프라인 편집 PWA
+- macOS·Windows·Linux 설치 패키지를 만드는 Tauri 2 데스크톱 셸
+- 앱 데이터 자동 저장, 원자적 파일 교체, 직전 정상 백업과 손상 원본 보존
+- 단일 인스턴스, 창 상태 복원, 운영체제 파일 선택·저장 대화상자
+- 독립 루트의 오프라인 웹 데모
 
-## 설치와 실행
+## 데스크톱 실행과 패키징
 
-Node.js 22 이상이 필요합니다.
+소스에서 실행하려면 Node.js 22 이상과 Rust stable, 운영체제별 Tauri 2
+빌드 도구가 필요합니다.
 
 ```bash
-npm install --global \
-  https://github.com/rad1092/siteboard/releases/download/v4.0.0/siteboard-4.0.0.tgz
-npx wrangler login
-siteboard studio
+npm ci
+npm run desktop
 ```
 
-Studio가 `http://127.0.0.1:47831/`을 열면 그 화면에서 편집, 배포,
-공개 주소 확인과 복구를 사용할 수 있습니다. 다른 로컬 포트가 필요하면:
+설치 패키지를 만들려면:
 
 ```bash
-siteboard studio --port 47832
+npm run desktop:build
 ```
 
-자동으로 브라우저를 열지 않으려면 `--no-open`을 함께 사용합니다.
+Tauri가 현재 운영체제에 맞는 앱 번들과 설치기를 `src-tauri/target/release/bundle`
+아래에 만듭니다. 공식 배포물은 플랫폼 코드 서명과 macOS 공증을 통과한
+결과만 사용합니다. 자세한 절차는
+[`docs/releasing.md`](./docs/releasing.md)에 있습니다.
 
-소스에서 개발할 때는:
+웹 데모만 개발할 때는:
 
 ```bash
-npm install
 npm run dev
 ```
 
-실제 Cloudflare 흐름은 `npm run build && npm run studio`로 확인합니다.
+## Cloudflare companion
+
+직접 배포와 production 복구를 개발 환경에서 사용하려면:
+
+```bash
+npx wrangler login
+npm run build:web
+npm run studio
+```
+
+companion이 `http://127.0.0.1:47831/`을 열면 Cloudflare 대상 연결,
+배포, 공개 주소 확인과 복구를 사용할 수 있습니다. 다른 포트는
+`npm run studio -- --port 47832`, 브라우저를 자동으로 열지 않으려면
+`--no-open`을 사용합니다.
 
 ## Cloudflare 인증
 
@@ -108,10 +130,15 @@ siteboard studio
 
 ## 데이터와 이력
 
-현재 편집 문서, Cloudflare 연결, 편집 저장본과 마지막 배포는
-`siteboard.project.v1` 작업 envelope에 함께 저장하고 직전 정상
-작업은 `siteboard.project.backup.v1`에 보관합니다. 기존 문서 v1·v2
-키는 변경하지 않고 새 작업 형식으로 읽어 옵니다.
+데스크톱의 현재 편집 문서, Cloudflare 연결, 편집 저장본과 마지막 배포는
+`.siteboard` 작업 envelope에 함께 저장합니다. 파일을 정하기 전에는
+운영체제 앱 데이터 폴더의 `autosave.siteboard`를 사용합니다. 저장할 때
+임시 파일을 디스크에 동기화한 뒤 교체하며, 직전 정상 파일은
+`*.backup`, 손상 원본은 앱 데이터 폴더의 `recovery/`에 보존합니다.
+
+웹 데모는 호환을 위해 `siteboard.project.v1`과
+`siteboard.project.backup.v1` 브라우저 키를 사용합니다. 기존 문서
+v1·v2 키는 변경하지 않고 새 작업 형식으로 읽어 옵니다.
 
 손상됐거나 더 최신 형식인 작업 원본은
 `siteboard.project.recovery.raw`에 그대로 보존하고 사용자가 선택할
@@ -128,9 +155,8 @@ append-only JSONL 파일에 추가합니다.
 테스트나 별도 작업 공간에서는 `SITEBOARD_HOME`으로 위치를 바꿀 수
 있습니다. 기존 이력 행은 수정하거나 덮어쓰지 않습니다.
 
-이미지는 JSON 안의 Data URL로 저장됩니다. 이미지 한 장은 800KB,
-문서 전체 이미지는 1.5MB까지 허용합니다. 브라우저 사이트 데이터를
-지우기 전에는 JSON 백업을 저장하세요.
+이미지는 프로젝트 안의 Data URL로 저장됩니다. 이미지 한 장은 800KB,
+문서 전체 이미지는 1.5MB, 프로젝트 파일은 20MB까지 허용합니다.
 
 ## 보안 경계
 
@@ -150,16 +176,16 @@ append-only JSONL 파일에 추가합니다.
 - Wrangler 로그 정화를 켜고 오류 보고와 측정 전송을 끕니다.
 - 토큰과 인증 헤더는 콘솔, 브라우저, 이력에 기록하지 않습니다.
 
-## 독립 배포 위치
+## 웹 데모 위치
 
-편집 PWA의 기준 주소는 다음 독립 루트입니다.
+웹 데모의 기준 주소는 다음 독립 루트입니다.
 
 ```text
 https://siteboard.whago.net/
 ```
 
 Vite, 매니페스트, 아이콘과 서비스 워커는 `/`를 기준으로 합니다.
-편집기와 로컬 Studio 모두 이 독립 주소를 기준으로 동작합니다.
+데스크톱 본체는 이 주소를 불러오지 않으며 번들된 로컬 화면을 사용합니다.
 
 ## ZIP 내보내기
 
@@ -183,7 +209,9 @@ ZIP에는 다음 파일이 들어갑니다.
 ```bash
 npm test
 npm run lint
-npm run build
+npm run build:web
+npm run desktop:check
+npm run desktop:test
 ```
 
 테스트는 기존 편집·복구·ZIP 기능과 함께 command runner, Cloudflare

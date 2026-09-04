@@ -34,11 +34,13 @@
     "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "desktop:icon": "tauri icon public/icon-512.png",
     "lint": "eslint .",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "vitest run --exclude scripts/retire-web.test.mjs",
+    "test:watch": "vitest --exclude scripts/retire-web.test.mjs",
     "preview": "vite preview",
     "studio": "node ./cli/siteboard.js studio",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "build:retired": "npm run build:web && node scripts/retire-web.mjs",
+    "test:retirement": "node --test scripts/retire-web.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

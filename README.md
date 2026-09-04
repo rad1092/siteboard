@@ -1,3 +1,8 @@
+> **개발 종료 · 2026-09-05**
+> Siteboard의 독립 제품 개발을 종료했습니다. 원본 자료는 삭제하지 않습니다.
+> [자료 회수](https://siteboard.whago.net/) · [구버전 열기](https://siteboard.whago.net/legacy/)
+> 아래 문서는 보존된 구버전의 문서입니다. 웹 종료 배포는 `npm run build:retired`, 원래 앱 빌드는 기존 명령을 사용합니다.
+
 # Siteboard
 
 Siteboard는 운영체제에 설치하는 로컬 우선 홈페이지 제작 소프트웨어입니다.
